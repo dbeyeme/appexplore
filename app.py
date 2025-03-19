@@ -24,7 +24,8 @@ import matplotlib.pyplot as plt
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet
-import google.generativeai as genai
+#import google.generativeai as genai
+from google import genai
 from fpdf import FPDF
 import time
 import pyarrow as pa
