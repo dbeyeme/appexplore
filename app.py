@@ -17,7 +17,6 @@ import fiona
 import os
 import chardet
 import tempfile
-import shutil
 import sqlalchemy
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -33,7 +32,9 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler, RobustScaler, Mi
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, StackingClassifier, StackingRegressor, VotingClassifier, VotingRegressor
+
 from sklearn.cluster import KMeans
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error, r2_score, accuracy_score
@@ -54,11 +55,13 @@ for key in ['datasets', 'explorations', 'sources', 'json_data', 'chat_history', 
         st.session_state[key] = {} if key != 'chat_history' else []
 
 # Configuration de l’API Gemini
-API_KEY = "AIzaSyBJLhpSfKsbxgVEJwYmPSEZmaVlKt5qNlI" 
+
+API_KEY = "AIzaSyBJLhpSfKsbxgVEJwYmPSEZmaVlKt5qNlI"  # Remplace par ta clé API réelle
 genai.configure(api_key=API_KEY)
 client = genai.GenerativeModel('gemini-1.5-flash')
 
-# CSS
+# CSS pour l'interface
+
 st.markdown("""
     <style>
     .stApp {background-color: #0A0F1A; font-family: 'Helvetica', 'Arial', sans-serif; color: #E6E6E6;}
@@ -84,7 +87,9 @@ class DataLoader:
             return ','
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    def load(self, source: any, source_type: str, skip_header: bool = False, header_row: int = None) -> Tuple[pd.DataFrame, Dict]:
+
+    def load(self, source: any, source_type: str, skip_header: bool = False, header_row: int = None, selected_sheets=None) -> Tuple[pd.DataFrame, bytes]:
+
         with tempfile.TemporaryDirectory() as temp_dir:
             try:
                 content_bytes, file_ext, total_size = None, None, 0
@@ -104,14 +109,19 @@ class DataLoader:
                     file_ext = source.split('.')[-1].lower()
 
                 elif source_type == "file":
-                    if isinstance(source, list):
+
+                    if isinstance(source, list):  # Cas des shapefiles
+
                         shp_file = None
                         for uploaded_file in source:
                             file_name = uploaded_file.name
                             file_ext_temp = file_name.split('.')[-1].lower()
                             file_path = os.path.join(temp_dir, file_name)
                             with open(file_path, 'wb') as f:
-                                f.write(uploaded_file.read())
+
+                                content_bytes = uploaded_file.read()
+                                f.write(content_bytes)
+
                             if file_ext_temp == 'shp':
                                 shp_file = file_name
                         if not shp_file:
@@ -122,6 +132,15 @@ class DataLoader:
                         content_bytes = source.read()
                         file_ext = source.name.split('.')[-1].lower()
                         total_size = len(content_bytes)
+
+                        if file_ext == 'xlsx' and selected_sheets:
+                            xl = pd.ExcelFile(io.BytesIO(content_bytes))
+                            if len(selected_sheets) > 1:
+                                data = {sheet: pd.read_excel(io.BytesIO(content_bytes), sheet_name=sheet, header=header_row, engine='openpyxl') for sheet in selected_sheets}
+                                return pd.concat(data.values(), ignore_index=True), content_bytes
+                            else:
+                                return pd.read_excel(io.BytesIO(content_bytes), sheet_name=selected_sheets[0], header=header_row, engine='openpyxl'), content_bytes
+
                     status_text.text(f"Chargé : {total_size / 1024:.1f} Ko")
 
                 elif source_type == "db":
@@ -168,18 +187,21 @@ class DataLoader:
                             if not any(line.strip() for line in lines):
                                 raise ValueError("Fichier vide ou sans données exploitables.")
                             max_cols = max(len(line.split(delimiter)) for line in lines if line.strip())
-                            df = pd.read_csv(io.StringIO(content_str), delimiter=delimiter, skiprows=skiprows, names=range(max_cols), engine='python', on_bad_lines='skip')
-                        return df, None
+
+                        return df, content_bytes if source_type == "file" else None
                     elif file_ext == 'xlsx':
                         df = pd.read_excel(io.BytesIO(processed_content), header=header_row, engine='openpyxl')
-                        return df, None
+                        return df, content_bytes if source_type == "file" else None
+
                     elif file_ext in ['json', 'geojson']:
                         try:
                             json_data = json.loads(content_str)
                             if "type" in json_data and json_data["type"] in ["FeatureCollection", "Feature"]:
                                 gdf = gpd.read_file(io.StringIO(content_str))
                                 return gdf.drop(columns=['geometry']).assign(latitude=gdf.geometry.centroid.y, longitude=gdf.geometry.centroid.x), None
-                            return pd.json_normalize(json_data), None
+
+                            return pd.json_normalize(json_data), content_bytes if source_type == "file" else None
+
                         except json.JSONDecodeError as e:
                             st.error(f"Erreur JSON : {str(e)}. Vérifiez le fichier.")
                             logger.error(f"Erreur JSON : {str(e)}")
@@ -415,7 +437,9 @@ def safe_dataframe_display(df: pd.DataFrame):
         df_safe[col] = df_safe[col].astype(str)
     return df_safe
 
-def preprocess_data(df: pd.DataFrame, features: list, target: str, encoding_method: str, normalization_method: str, modeling_type: str) -> Tuple[pd.DataFrame, pd.Series, list, Any]:
+
+def preprocess_data(df: pd.DataFrame, features: list, target: str, encoding_method: str, normalization_method: str, modeling_type: str, model_type: str) -> Tuple[pd.DataFrame, pd.Series, list, Any]:
+
     X = df[features].copy()
     y = df[target].copy() if modeling_type != "Clustering" else None
     transformer = None
@@ -426,20 +450,18 @@ def preprocess_data(df: pd.DataFrame, features: list, target: str, encoding_meth
 
     for col in X.columns:
         if col in categorical_cols:
-            try:
-                X[col] = pd.to_numeric(X[col], errors='raise')
+
+            if encoding_method == "Label Encoding":
+                le = LabelEncoder()
+                X[col] = le.fit_transform(X[col].astype(str))
                 processed_features.append(col)
-            except ValueError:
-                if encoding_method == "Label Encoding":
-                    le = LabelEncoder()
-                    X[col] = le.fit_transform(X[col].astype(str))
-                    processed_features.append(col)
-                elif encoding_method == "One-Hot Encoding":
-                    dummies = pd.get_dummies(X[col], prefix=col)
-                    X = pd.concat([X.drop(columns=[col]), dummies], axis=1)
-                    processed_features.extend(dummies.columns)
-                elif encoding_method == "Exclude":
-                    X = X.drop(columns=[col])
+            elif encoding_method == "One-Hot Encoding":
+                dummies = pd.get_dummies(X[col], prefix=col)
+                X = pd.concat([X.drop(columns=[col]), dummies], axis=1)
+                processed_features.extend(dummies.columns)
+            elif encoding_method == "Exclude":
+                X = X.drop(columns=[col])
+
         else:
             processed_features.append(col)
 
@@ -454,14 +476,16 @@ def preprocess_data(df: pd.DataFrame, features: list, target: str, encoding_meth
             scaler = MinMaxScaler()
             X[numeric_cols] = scaler.fit_transform(X[numeric_cols])
 
-    if modeling_type != "Clustering":
-        if y.dtype == 'object' and encoding_method != "Exclude":
-            try:
-                y = pd.to_numeric(y, errors='raise')
-            except ValueError:
-                le = LabelEncoder()
-                y = pd.Series(le.fit_transform(y.astype(str)), index=y.index)
-        X = X.dropna()
+
+    if modeling_type == "Regression" and y is not None and y.dtype == 'object':
+        raise ValueError("La variable cible doit être numérique pour la régression. Utilisez la numérisation dans 'Traitement'.")
+    elif modeling_type == "Classification" and y is not None and y.dtype == 'object':
+        le = LabelEncoder()
+        y = pd.Series(le.fit_transform(y.astype(str)), index=y.index)
+
+    X = X.dropna()
+    if modeling_type != "Clustering" and y is not None:
+
         y = y.loc[X.index]
 
     if modeling_type == "Regression" and "Polynomial" in model_type:
@@ -473,19 +497,18 @@ def preprocess_data(df: pd.DataFrame, features: list, target: str, encoding_meth
 
 def train_model(df: pd.DataFrame, features: list, target: str, modeling_type: str, model_type: str, encoding_method: str, normalization_method: str) -> Tuple[Any, Dict, list, Any]:
     try:
-        X, y, processed_features, transformer = preprocess_data(df, features, target if modeling_type != "Clustering" else None, encoding_method, normalization_method, modeling_type)
-        
-        if modeling_type == "Regression":
-            if y.dtype not in [np.float64, np.int64]:
-                raise ValueError("Erreur de l'utilisateur : La variable cible doit être numérique pour la régression.")
-        elif modeling_type == "Classification":
-            if y.dtype in [np.float64, np.int64] and y.nunique() > 10:
-                raise ValueError("Erreur de l'utilisateur : La variable cible doit être catégorique pour la classification.")
+
+        X, y, processed_features, transformer = preprocess_data(df, features, target if modeling_type != "Clustering" else None, encoding_method, normalization_method, modeling_type, model_type)
+
         
         if len(X) < 2:
             raise ValueError("Pas assez de données pour l’entraînement après prétraitement.")
 
         if modeling_type == "Regression":
+
+            if y.dtype not in [np.float64, np.int64]:
+                raise ValueError("Erreur de l'utilisateur : La variable cible doit être numérique pour la régression.")
+
             if model_type == "Linear Regression":
                 model = LinearRegression()
             elif model_type == "Polynomial Regression":
@@ -496,11 +519,23 @@ def train_model(df: pd.DataFrame, features: list, target: str, modeling_type: st
                 model = RandomForestRegressor()
             elif model_type == "XGBoost":
                 model = xgb.XGBRegressor()
+
+            elif model_type == "Stacking":
+                estimators = [("lr", LinearRegression()), ("rf", RandomForestRegressor()), ("xgb", xgb.XGBRegressor())]
+                model = StackingRegressor(estimators=estimators, final_estimator=LinearRegression())
+            elif model_type == "Voting":
+                estimators = [("lr", LinearRegression()), ("rf", RandomForestRegressor()), ("xgb", xgb.XGBRegressor())]
+                model = VotingRegressor(estimators=estimators)
+
             model.fit(X, y)
             y_pred = model.predict(X)
             metrics = {"R²": r2_score(y, y_pred), "MSE": mean_squared_error(y, y_pred)}
 
         elif modeling_type == "Classification":
+
+            if y.dtype in [np.float64, np.int64] and y.nunique() > 10:
+                raise ValueError("Erreur de l'utilisateur : La variable cible doit être catégorique pour la classification.")
+
             if model_type == "Decision Tree":
                 model = DecisionTreeClassifier()
             elif model_type == "Random Forest":
@@ -509,6 +544,14 @@ def train_model(df: pd.DataFrame, features: list, target: str, modeling_type: st
                 model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss')
             elif model_type == "Logistic Regression":
                 model = LogisticRegression()
+
+            elif model_type == "Stacking":
+                estimators = [("dt", DecisionTreeClassifier()), ("rf", RandomForestClassifier()), ("xgb", xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss'))]
+                model = StackingClassifier(estimators=estimators, final_estimator=LogisticRegression())
+            elif model_type == "Voting":
+                estimators = [("dt", DecisionTreeClassifier()), ("rf", RandomForestClassifier()), ("xgb", xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss'))]
+                model = VotingClassifier(estimators=estimators, voting='soft')
+
             model.fit(X, y)
             y_pred = model.predict(X)
             metrics = {"Accuracy": accuracy_score(y, y_pred)}
@@ -534,12 +577,13 @@ class DataPipeline:
         self.loader = DataLoader()
         self.explorer = DataExplorer()
 
-    def process(self, source: str, source_type: str, name: str, skip_header: bool = False, header_row: int = None) -> Tuple[pd.DataFrame, Dict, Dict]:
-        data, json_data = self.loader.load(source, source_type, skip_header, header_row)
+
+    def process(self, source: str, source_type: str, name: str, skip_header: bool = False, header_row: int = None, selected_sheets=None) -> Tuple[pd.DataFrame, Dict, bytes]:
+        data, raw_data = self.loader.load(source, source_type, skip_header, header_row, selected_sheets)
         if data is not None:
             exploration = self.explorer.explore(data)
-            return data, exploration, None
-        return None, None, json_data
+            return data, exploration, raw_data
+        return None, None, raw_data
 
 def main():
     st.title("🔍 Exploration, Analyse et Modélisation de Données")
@@ -560,7 +604,9 @@ def main():
                 header_row = st.number_input(f"Ligne comme en-tête {i+1}", min_value=0, value=0, step=1, key=f"header_row_{i}")
                 if st.button(f"📤 Charger {i+1}", key=f"load_{i}") and source and name:
                     logger.info(f"Chargement de {name} depuis URL {source}")
-                    data, exploration, json_data = pipeline.process(source, "url", name, skip_header, header_row)
+
+                    data, exploration, raw_data = pipeline.process(source, "url", name, skip_header, header_row)
+
                     if data is not None:
                         st.session_state['datasets'][name] = data
                         st.session_state['explorations'][name] = exploration
@@ -569,8 +615,8 @@ def main():
                         st.session_state['test_interpretations'][name] = {}
                         st.success(f"✅ '{name}' chargé ({len(data)} lignes)")
                         logger.info(f"Dataset {name} chargé avec succès ({len(data)} lignes)")
-                    elif json_data:
-                        st.session_state['json_data'][name] = json_data
+                    elif raw_data:
+                        st.session_state['json_data'][name] = raw_data
                         st.session_state['sources'][name] = (source, "url", skip_header, header_row)
                         st.info(f"📋 JSON '{name}' chargé.")
 
@@ -583,18 +629,24 @@ def main():
                 for uploaded_file in uploaded_files:
                     name = uploaded_file.name.split('.')[0]
                     logger.info(f"Chargement de {name} depuis fichier local")
-                    data, exploration, json_data = pipeline.process(uploaded_file, "file", name, skip_header, header_row)
+
+                    selected_sheets = None
+                    if uploaded_file.name.endswith('.xlsx'):
+                        xl = pd.ExcelFile(uploaded_file)
+                        selected_sheets = st.multiselect(f"Choisir les feuilles pour {name}", xl.sheet_names, default=xl.sheet_names[0], key=f"sheets_{name}")
+                    data, exploration, raw_data = pipeline.process(uploaded_file, "file", name, skip_header, header_row, selected_sheets)
                     if data is not None:
                         st.session_state['datasets'][name] = data
                         st.session_state['explorations'][name] = exploration
-                        st.session_state['sources'][name] = (uploaded_file, "file", skip_header, header_row)
+                        st.session_state['sources'][name] = (raw_data, "file", skip_header, header_row, uploaded_file.name)
+
                         st.session_state['test_results'][name] = {}
                         st.session_state['test_interpretations'][name] = {}
                         st.success(f"✅ '{name}' chargé ({len(data)} lignes)")
                         logger.info(f"Dataset {name} chargé avec succès ({len(data)} lignes)")
-                    elif json_data:
-                        st.session_state['json_data'][name] = json_data
-                        st.session_state['sources'][name] = (uploaded_file, "file", skip_header, header_row)
+                    elif raw_data:
+                        st.session_state['json_data'][name] = raw_data
+                        st.session_state['sources'][name] = (raw_data, "file", skip_header, header_row, uploaded_file.name)
                         st.info(f"📋 JSON '{name}' chargé.")
 
         elif source_type == "Base de Données":
@@ -603,7 +655,9 @@ def main():
             name = st.text_input("Nom du dataset", "db_dataset", key="db_name")
             if st.button("📤 Charger", key="load_db"):
                 logger.info(f"Chargement de {name} depuis DB avec requête {query}")
-                data, exploration, json_data = pipeline.process((db_url, query), "db", name)
+
+                data, exploration, raw_data = pipeline.process((db_url, query), "db", name)
+
                 if data is not None:
                     st.session_state['datasets'][name] = data
                     st.session_state['explorations'][name] = exploration
@@ -618,11 +672,19 @@ def main():
         with col1:
             if st.button("🔄 Actualiser", key="refresh"):
                 logger.info("Actualisation des datasets")
-                for name, (source, source_type, skip_header, header_row) in st.session_state['sources'].items():
-                    data, exploration, json_data = pipeline.process(source, source_type, name, skip_header, header_row)
+
+                for name, (source, source_type, skip_header, header_row, *extra) in st.session_state['sources'].items():
+                    if source_type == "file":
+                        file_source = io.BytesIO(source)
+                        file_source.name = extra[0] if extra else name
+                        data, exploration, raw_data = pipeline.process(file_source, source_type, name, skip_header, header_row)
+                        if name in st.session_state['datasets']:
+                            data = st.session_state['datasets'][name]  # Conserver les données traitées
+                    else:
+                        data, exploration, raw_data = pipeline.process(source, source_type, name, skip_header, header_row)
                     if data is not None:
                         st.session_state['datasets'][name] = data
-                        st.session_state['explorations'][name] = exploration
+                        st.session_state['explorations'][name] = pipeline.explorer.explore(data)
                         st.session_state['test_results'][name] = {}
                         st.session_state['test_interpretations'][name] = {}
                     st.success("✅ Datasets actualisés")
@@ -776,24 +838,28 @@ def main():
                                 logger.info(f"Colonne {new_col_name} créée pour {ds}")
 
                 with st.expander("🕳️ Traitement des Valeurs Manquantes"):
-                    col_to_fill = st.selectbox("Colonne", ["Toutes"] + list(set().union(*[set(st.session_state['datasets'][ds].columns) for ds in selected_datasets])), key="fill_col")
+
+                    cols_to_fill = st.multiselect("Colonnes", ["Toutes"] + list(set().union(*[set(st.session_state['datasets'][ds].columns) for ds in selected_datasets])), key="fill_cols")
                     fill_method = st.selectbox("Méthode", ["Supprimer les lignes", "Supprimer toutes lignes vides", "Remplacer par moyenne", "Remplacer par mode", "Plus proche voisin"], key="fill_method")
                     if st.button("✅ Traiter", key="apply_fill"):
                         logger.info(f"Traitement des valeurs manquantes pour {selected_datasets}")
                         for ds in selected_datasets:
                             data = st.session_state['datasets'][ds].copy()
-                            if col_to_fill == "Toutes" and fill_method == "Supprimer toutes lignes vides":
+
+                            if "Toutes" in cols_to_fill and fill_method == "Supprimer toutes lignes vides":
                                 data.dropna(how='all', inplace=True)
-                            elif col_to_fill in data.columns:
-                                if fill_method == "Supprimer les lignes":
-                                    data.dropna(subset=[col_to_fill], inplace=True)
-                                elif fill_method == "Remplacer par moyenne" and data[col_to_fill].dtype in [np.float64, np.int64]:
-                                    data[col_to_fill].fillna(data[col_to_fill].mean(), inplace=True)
-                                elif fill_method == "Remplacer par mode":
-                                    mode = data[col_to_fill].mode()
-                                    data[col_to_fill].fillna(mode[0] if not mode.empty else None, inplace=True)
-                                elif fill_method == "Plus proche voisin":
-                                    data[col_to_fill] = data[col_to_fill].interpolate(method='nearest').ffill().bfill()
+                            else:
+                                target_cols = [col for col in cols_to_fill if col != "Toutes" and col in data.columns]
+                                for col in target_cols:
+                                    if fill_method == "Supprimer les lignes":
+                                        data.dropna(subset=[col], inplace=True)
+                                    elif fill_method == "Remplacer par moyenne" and data[col].dtype in [np.float64, np.int64]:
+                                        data[col].fillna(data[col].mean(), inplace=True)
+                                    elif fill_method == "Remplacer par mode":
+                                        mode = data[col].mode()
+                                        data[col].fillna(mode[0] if not mode.empty else None, inplace=True)
+                                    elif fill_method == "Plus proche voisin":
+                                        data[col] = data[col].interpolate(method='nearest').ffill().bfill()
                             st.session_state['datasets'][ds] = data
                             st.session_state['explorations'][ds] = pipeline.explorer.explore(data)
                             st.success(f"✅ Valeurs manquantes traitées pour '{ds}'")
@@ -820,6 +886,43 @@ def main():
                                 st.session_state['explorations'][ds] = pipeline.explorer.explore(data)
                                 st.success(f"✅ Aberrants traités pour '{ds}'")
                                 logger.info(f"Aberrants traités pour {ds}")
+
+
+                with st.expander("🔢 Numérisation et Normalisation"):
+                    st.info("Prétraitez vos données avant modélisation.")
+                    cols_to_process = st.multiselect("Colonnes à traiter", set().union(*[set(st.session_state['datasets'][ds].columns) for ds in selected_datasets]), key="process_cols")
+                    encoding_method = st.selectbox("Méthode de numérisation", ["Label Encoding", "One-Hot Encoding", "Exclude"], key="encoding_method_pre")
+                    normalization_method = st.selectbox("Méthode de normalisation", ["None", "StandardScaler", "RobustScaler", "MinMaxScaler"], key="normalization_method_pre")
+                    if st.button("✅ Appliquer", key="apply_preprocess"):
+                        logger.info(f"Numérisation et normalisation pour {selected_datasets}")
+                        for ds in selected_datasets:
+                            data = st.session_state['datasets'][ds].copy()
+                            for col in cols_to_process:
+                                if col in data.columns:
+                                    if data[col].dtype == 'object':
+                                        if encoding_method == "Label Encoding":
+                                            le = LabelEncoder()
+                                            data[col] = le.fit_transform(data[col].astype(str))
+                                        elif encoding_method == "One-Hot Encoding":
+                                            dummies = pd.get_dummies(data[col], prefix=col)
+                                            data = pd.concat([data.drop(columns=[col]), dummies], axis=1)
+                                        elif encoding_method == "Exclude":
+                                            data.drop(columns=[col], inplace=True)
+                                    if normalization_method != "None" and data[col].dtype in [np.float64, np.int64]:
+                                        if normalization_method == "StandardScaler":
+                                            scaler = StandardScaler()
+                                            data[col] = scaler.fit_transform(data[[col]])
+                                        elif normalization_method == "RobustScaler":
+                                            scaler = RobustScaler()
+                                            data[col] = scaler.fit_transform(data[[col]])
+                                        elif normalization_method == "MinMaxScaler":
+                                            scaler = MinMaxScaler()
+                                            data[col] = scaler.fit_transform(data[[col]])
+                            st.session_state['datasets'][ds] = data
+                            st.session_state['explorations'][ds] = pipeline.explorer.explore(data)
+                            st.success(f"✅ Prétraitement appliqué pour '{ds}'")
+                            st.dataframe(data.head(), use_container_width=True)
+                            logger.info(f"Prétraitement appliqué pour {ds}")
 
                 with st.expander("🔗 Jointure de Datasets"):
                     if len(dataset_names) > 1:
@@ -1003,11 +1106,14 @@ def main():
             st.subheader("🤖 Prédictions et Magie IA")
             if len(data.columns) > 1:
                 features = st.multiselect("Variables explicatives", data.columns, key="model_features")
-                target = st.selectbox("Variable cible", data.columns, key="model_target") if "Clustering" not in st.session_state.get('modeling_type', '') else None
+
+                available_targets = [col for col in data.columns if col not in features]
+                target = st.selectbox("Variable cible", available_targets, key="model_target") if "Clustering" not in st.session_state.get('modeling_type', '') else None
                 modeling_type = st.selectbox("Type de modélisation", ["Regression", "Classification", "Clustering"], key="modeling_type")
                 model_options = {
-                    "Regression": ["Linear Regression", "Polynomial Regression", "Decision Tree", "Random Forest", "XGBoost"],
-                    "Classification": ["Decision Tree", "Random Forest", "XGBoost", "Logistic Regression"],
+                    "Regression": ["Linear Regression", "Polynomial Regression", "Decision Tree", "Random Forest", "XGBoost", "Stacking", "Voting"],
+                    "Classification": ["Decision Tree", "Random Forest", "XGBoost", "Logistic Regression", "Stacking", "Voting"],
+
                     "Clustering": ["K-Means"]
                 }
                 model_type = st.selectbox("Modèle", model_options[modeling_type], key="model_type")
@@ -1023,7 +1129,9 @@ def main():
                         for k, v in metrics.items():
                             st.write(f"{k}: {v:.4f}")
                         try:
-                            X_processed, y_processed, _, _ = preprocess_data(data, features, target if modeling_type != "Clustering" else None, encoding_method, normalization_method, modeling_type)
+
+                            X_processed, y_processed, _, _ = preprocess_data(data, features, target if modeling_type != "Clustering" else None, encoding_method, normalization_method, modeling_type, model_type)
+
                             if modeling_type == "Regression":
                                 fig_pred = px.scatter(x=y_processed, y=model.predict(X_processed), labels={"x": "Réel", "y": "Prédit"}, title=f"Prédictions ({model_type})")
                                 st.plotly_chart(fig_pred)
@@ -1055,19 +1163,31 @@ def main():
                     report = generate_gemini_report(temp_pdf)
                     st.session_state['chat_history'] = [("", report)]
                     st.success("Rapport généré avec succès !")
+
+                    logger.info(f"Rapport généré pour {dataset_to_analyze}")
                 except Exception as e:
-                    st.error(f"Erreur lors de la génération du rapport : {str(e)}")
-                    logger.error(f"Erreur génération rapport : {str(e)}")
+                    error_msg = f"Erreur lors de la génération du rapport : {str(e)}"
+                    logger.error(error_msg, exc_info=True)
+                    st.error(error_msg)
 
-        if st.session_state['chat_history']:
-            st.markdown("<h3>💬 Rapport d’analyse</h3>", unsafe_allow_html=True)
-            report_text = display_progressive_report(st.session_state['chat_history'][0][1])
-            pdf_data = create_downloadable_pdf(dataset_to_analyze, report_text)
-            st.download_button(label="📄 Télécharger le rapport en PDF", data=pdf_data, file_name=f"rapport_{dataset_to_analyze}.pdf", mime="application/pdf", key="download_report")
+                if st.session_state['chat_history']:
+                    st.markdown("<div class='section-box'><h2>📜 Rapport Généré</h2>", unsafe_allow_html=True)
+                    report = display_progressive_report(st.session_state['chat_history'][-1][1])
+                    pdf_bytes = create_downloadable_pdf(dataset_to_analyze, report)
+                    st.download_button(
+                        label="💾 Télécharger le Rapport en PDF",
+                        data=pdf_bytes,
+                        file_name=f"rapport_{dataset_to_analyze}.pdf",
+                        mime="application/pdf",
+                        key="download_report"
+                    )
+                    st.markdown("</div>", unsafe_allow_html=True)
 
-        st.session_state['test_results'][dataset_to_analyze] = test_results
-        st.session_state['test_interpretations'][dataset_to_analyze] = test_interpretations
-        st.markdown("</div>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)  # Fin de la section-box Exploration, Visualisation et Modélisation
+
+        else:
+            st.info("Chargez un dataset depuis la barre latérale pour commencer l'exploration.")
 
 if __name__ == "__main__":
     main()
+
