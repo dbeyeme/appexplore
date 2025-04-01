@@ -17,7 +17,6 @@ import fiona
 import os
 import chardet
 import tempfile
-import shutil
 import sqlalchemy
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -33,7 +32,7 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler, RobustScaler, Mi
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, StackingClassifier, StackingRegressor, VotingClassifier, VotingRegressor
 from sklearn.cluster import KMeans
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error, r2_score, accuracy_score
@@ -54,11 +53,11 @@ for key in ['datasets', 'explorations', 'sources', 'json_data', 'chat_history', 
         st.session_state[key] = {} if key != 'chat_history' else []
 
 # Configuration de l’API Gemini
-API_KEY = "AIzaSyBJLhpSfKsbxgVEJwYmPSEZmaVlKt5qNlI" 
+API_KEY = "AIzaSyBJLhpSfKsbxgVEJwYmPSEZmaVlKt5qNlI"  # Remplace par ta clé API réelle
 genai.configure(api_key=API_KEY)
 client = genai.GenerativeModel('gemini-1.5-flash')
 
-# CSS
+# CSS pour l'interface
 st.markdown("""
     <style>
     .stApp {background-color: #0A0F1A; font-family: 'Helvetica', 'Arial', sans-serif; color: #E6E6E6;}
@@ -84,117 +83,124 @@ class DataLoader:
             return ','
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    def load(self, source: any, source_type: str, skip_header: bool = False, header_row: int = None) -> Tuple[pd.DataFrame, Dict]:
-        temp_dir = tempfile.mkdtemp()
-        try:
-            content_bytes, file_ext, total_size = None, None, 0
-            status_text = st.empty()
+    def load(self, source: any, source_type: str, skip_header: bool = False, header_row: int = None, selected_sheets=None) -> Tuple[pd.DataFrame, bytes]:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                content_bytes, file_ext, total_size = None, None, 0
+                status_text = st.empty()
 
-            if source_type == "url":
-                with requests.head(source, timeout=10) as head_response:
-                    head_response.raise_for_status()
-                    total_size = int(head_response.headers.get("Content-Length", 0))
-                progress_bar = st.progress(0)
-                with st.spinner("Téléchargement..."):
-                    response = requests.get(source, timeout=15)
-                    response.raise_for_status()
-                    content_bytes = response.content
-                downloaded_size = len(content_bytes)
-                progress_bar.progress(min(int((downloaded_size / total_size) * 100), 100) if total_size else 100)
-                file_ext = source.split('.')[-1].lower()
+                if source_type == "url":
+                    with requests.head(source, timeout=10) as head_response:
+                        head_response.raise_for_status()
+                        total_size = int(head_response.headers.get("Content-Length", 0))
+                    progress_bar = st.progress(0)
+                    with st.spinner("Téléchargement..."):
+                        response = requests.get(source, timeout=15)
+                        response.raise_for_status()
+                        content_bytes = response.content
+                    downloaded_size = len(content_bytes)
+                    progress_bar.progress(min(int((downloaded_size / total_size) * 100), 100) if total_size else 100)
+                    file_ext = source.split('.')[-1].lower()
 
-            elif source_type == "file":
-                if isinstance(source, list):
-                    shp_file = None
-                    for uploaded_file in source:
-                        file_name = uploaded_file.name
-                        file_ext_temp = file_name.split('.')[-1].lower()
-                        with open(os.path.join(temp_dir, file_name), 'wb') as f:
-                            f.write(uploaded_file.read())
-                        if file_ext_temp == 'shp':
-                            shp_file = file_name
-                    if not shp_file:
-                        raise ValueError("Aucun fichier .shp trouvé.")
-                    file_ext = 'shp'
-                    total_size = sum(f.size for f in source)
+                elif source_type == "file":
+                    if isinstance(source, list):  # Cas des shapefiles
+                        shp_file = None
+                        for uploaded_file in source:
+                            file_name = uploaded_file.name
+                            file_ext_temp = file_name.split('.')[-1].lower()
+                            file_path = os.path.join(temp_dir, file_name)
+                            with open(file_path, 'wb') as f:
+                                content_bytes = uploaded_file.read()
+                                f.write(content_bytes)
+                            if file_ext_temp == 'shp':
+                                shp_file = file_name
+                        if not shp_file:
+                            raise ValueError("Aucun fichier .shp trouvé.")
+                        file_ext = 'shp'
+                        total_size = sum(f.size for f in source)
+                    else:
+                        content_bytes = source.read()
+                        file_ext = source.name.split('.')[-1].lower()
+                        total_size = len(content_bytes)
+                        if file_ext == 'xlsx' and selected_sheets:
+                            xl = pd.ExcelFile(io.BytesIO(content_bytes))
+                            if len(selected_sheets) > 1:
+                                data = {sheet: pd.read_excel(io.BytesIO(content_bytes), sheet_name=sheet, header=header_row, engine='openpyxl') for sheet in selected_sheets}
+                                return pd.concat(data.values(), ignore_index=True), content_bytes
+                            else:
+                                return pd.read_excel(io.BytesIO(content_bytes), sheet_name=selected_sheets[0], header=header_row, engine='openpyxl'), content_bytes
+                    status_text.text(f"Chargé : {total_size / 1024:.1f} Ko")
+
+                elif source_type == "db":
+                    engine = sqlalchemy.create_engine(source[0])
+                    df = pd.read_sql(source[1], engine)
+                    return df, None
+
                 else:
-                    content_bytes = source.read()
-                    file_ext = source.name.split('.')[-1].lower()
-                    total_size = len(content_bytes)
-                status_text.text(f"Chargé : {total_size / 1024:.1f} Ko")
+                    raise ValueError(f"Type de source '{source_type}' non supporté")
 
-            elif source_type == "db":
-                engine = sqlalchemy.create_engine(source[0])
-                df = pd.read_sql(source[1], engine)
-                return df, None
+                if source_type != "db":
+                    processed_content = content_bytes
+                    if file_ext == 'gz':
+                        processed_content = gzip.decompress(content_bytes)
+                        file_ext = source.split('.')[-2].lower() if source_type == "url" else source.name.split('.')[-2].lower()
+                    elif file_ext == 'zip':
+                        with zipfile.ZipFile(io.BytesIO(content_bytes)) as z:
+                            file_name = z.namelist()[0]
+                            processed_content = z.read(file_name)
+                            file_ext = file_name.split('.')[-1].lower()
 
-            else:
-                raise ValueError(f"Type de source '{source_type}' non supporté")
+                    if file_ext == 'shp':
+                        shp_path = os.path.join(temp_dir, shp_file if source_type == "file" else 'data.shp')
+                        with fiona.Env(SHAPE_RESTORE_SHX='YES'):
+                            gdf = gpd.read_file(shp_path)
+                        df = gdf.drop(columns=['geometry']).assign(latitude=gdf.geometry.centroid.y, longitude=gdf.geometry.centroid.x)
+                        return df, None
 
-            if source_type != "db":
-                processed_content = content_bytes
-                if file_ext == 'gz':
-                    processed_content = gzip.decompress(content_bytes)
-                    file_ext = source.split('.')[-2].lower() if source_type == "url" else source.name.split('.')[-2].lower()
-                elif file_ext == 'zip':
-                    with zipfile.ZipFile(io.BytesIO(content_bytes)) as z:
-                        file_name = z.namelist()[0]
-                        processed_content = z.read(file_name)
-                        file_ext = file_name.split('.')[-1].lower()
+                    encoding = chardet.detect(processed_content[:1024])['encoding'] or 'utf-8'
+                    content_str = processed_content.decode(encoding, errors='replace')
 
-                if file_ext == 'shp':
-                    shp_path = os.path.join(temp_dir, 'data.shp' if source_type == "url" else shp_file)
-                    with fiona.Env(SHAPE_RESTORE_SHX='YES'):
-                        gdf = gpd.read_file(shp_path)
-                    df = gdf.drop(columns=['geometry']).assign(latitude=gdf.geometry.centroid.y, longitude=gdf.geometry.centroid.x)
-                    return df, None
-
-                encoding = chardet.detect(processed_content[:1024])['encoding'] or 'utf-8'
-                content_str = processed_content.decode(encoding, errors='replace')
-
-                if file_ext in ['csv', 'txt']:
-                    delimiter = self.detect_delimiter(content_str)
-                    skiprows = [0] if skip_header else []
-                    header = header_row if header_row is not None else (0 if not skip_header else None)
-                    try:
-                        df = pd.read_csv(io.StringIO(content_str), delimiter=delimiter, skiprows=skiprows, header=header, engine='python', on_bad_lines='warn')
-                        if header_row is not None and header is None:
-                            df.columns = df.iloc[0]
-                            df = df.drop(0).reset_index(drop=True)
-                    except Exception as e:
-                        st.warning(f"Structure irrégulière détectée : {str(e)}. Tentative de correction...")
-                        lines = content_str.splitlines()
-                        if not any(line.strip() for line in lines):
-                            raise ValueError("Fichier vide ou sans données exploitables.")
-                        max_cols = max(len(line.split(delimiter)) for line in lines if line.strip())
-                        df = pd.read_csv(io.StringIO(content_str), delimiter=delimiter, skiprows=skiprows, names=range(max_cols), engine='python', on_bad_lines='skip')
-                    return df, None
-                elif file_ext == 'xlsx':
-                    df = pd.read_excel(io.BytesIO(processed_content), header=header_row, engine='openpyxl')
-                    return df, None
-                elif file_ext in ['json', 'geojson']:
-                    try:
-                        json_data = json.loads(content_str)
-                        if "type" in json_data and json_data["type"] in ["FeatureCollection", "Feature"]:
-                            gdf = gpd.read_file(io.StringIO(content_str))
-                            return gdf.drop(columns=['geometry']).assign(latitude=gdf.geometry.centroid.y, longitude=gdf.geometry.centroid.x), None
-                        return pd.json_normalize(json_data), None
-                    except json.JSONDecodeError as e:
-                        st.error(f"Erreur JSON : {str(e)}. Vérifiez le fichier.")
-                        logger.error(f"Erreur JSON : {str(e)}")
-                        return None, None
-        except Exception as e:
-            error_msg = f"Erreur de chargement : {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            error_explanation = analyze_and_interpret("loading", None, error_msg, is_user_error=False)
-            st.error(error_explanation)
-            return None, None
-        finally:
-            if 'progress_bar' in locals():
-                progress_bar.empty()
-            status_text.empty()
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                    if file_ext in ['csv', 'txt']:
+                        delimiter = self.detect_delimiter(content_str)
+                        skiprows = [0] if skip_header else []
+                        header = header_row if header_row is not None else (0 if not skip_header else None)
+                        try:
+                            df = pd.read_csv(io.StringIO(content_str), delimiter=delimiter, skiprows=skiprows, header=header, engine='python', on_bad_lines='warn')
+                            if header_row is not None and header is None:
+                                df.columns = df.iloc[0]
+                                df = df.drop(0).reset_index(drop=True)
+                        except Exception as e:
+                            st.warning(f"Structure irrégulière détectée : {str(e)}. Tentative de correction...")
+                            lines = content_str.splitlines()
+                            if not any(line.strip() for line in lines):
+                                raise ValueError("Fichier vide ou sans données exploitables.")
+                            max_cols = max(len(line.split(delimiter)) for line in lines if line.strip())
+                            df = pd.read_csv(io.StringIO(content_str), delimiter=delimiter, skiprows=skiprows, names=range(max_cols), engine='python', on_bad_lines='skip')
+                        return df, content_bytes if source_type == "file" else None
+                    elif file_ext == 'xlsx':
+                        df = pd.read_excel(io.BytesIO(processed_content), header=header_row, engine='openpyxl')
+                        return df, content_bytes if source_type == "file" else None
+                    elif file_ext in ['json', 'geojson']:
+                        try:
+                            json_data = json.loads(content_str)
+                            if "type" in json_data and json_data["type"] in ["FeatureCollection", "Feature"]:
+                                gdf = gpd.read_file(io.StringIO(content_str))
+                                return gdf.drop(columns=['geometry']).assign(latitude=gdf.geometry.centroid.y, longitude=gdf.geometry.centroid.x), None
+                            return pd.json_normalize(json_data), content_bytes if source_type == "file" else None
+                        except json.JSONDecodeError as e:
+                            st.error(f"Erreur JSON : {str(e)}. Vérifiez le fichier.")
+                            logger.error(f"Erreur JSON : {str(e)}")
+                            return None, None
+            except Exception as e:
+                error_msg = f"Erreur de chargement : {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                error_explanation = analyze_and_interpret("loading", None, error_msg, is_user_error=False)
+                st.error(error_explanation)
+                return None, None
+            finally:
+                if 'progress_bar' in locals():
+                    progress_bar.empty()
+                status_text.empty()
 
 class DataExplorer:
     @staticmethod
@@ -289,29 +295,38 @@ def chi2_matrix(df: pd.DataFrame) -> pd.DataFrame:
     return chi2_pvals.astype(float)
 
 def save_matrix_to_image(matrix: pd.DataFrame, title: str, filename: str, method: str = None):
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(matrix, annot=True, cmap='Blues' if method == 'chi2' else 'RdBu_r',
-                vmin=0 if method == 'chi2' else -1, vmax=1, fmt='.3f', annot_kws={"size": 10})
-    plt.title(title)
-    plt.savefig(filename, dpi=300, bbox_inches='tight')
-    plt.close()
+    try:
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(matrix, annot=True, cmap='Blues' if method == 'chi2' else 'RdBu_r',
+                    vmin=0 if method == 'chi2' else -1, vmax=1, fmt='.3f', annot_kws={"size": 10})
+        plt.title(title)
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        plt.close()
+        logger.info(f"Matrice sauvegardée à {filename}")
+    except Exception as e:
+        logger.error(f"Erreur lors de la sauvegarde de la matrice : {str(e)}")
+        raise
 
 def analyze_and_interpret(test_type: str, results: Dict, error: str = None, is_user_error: bool = False) -> str:
-    if error:
-        if is_user_error:
-            prompt = f"Erreur causée par l'utilisateur : '{error}'. Génère un message clair et compréhensible expliquant à l'utilisateur ce qu'il a mal fait."
+    try:
+        if error:
+            if is_user_error:
+                prompt = f"Erreur causée par l'utilisateur : '{error}'. Génère un message clair et compréhensible expliquant à l'utilisateur ce qu'il a mal fait."
+            else:
+                prompt = f"Erreur interne de l'outil : '{error}'. Génère un message clair et compréhensible pour un utilisateur non technique expliquant le problème."
+            response = client.generate_content(prompt)
+            return response.text.strip()
         else:
-            prompt = f"Erreur interne de l'outil : '{error}'. Génère un message clair et compréhensible pour un utilisateur non technique expliquant le problème."
-        response = client.generate_content(prompt)
-        return response.text.strip()
-    else:
-        prompt = f"Interprète ces résultats de test {test_type} : {json.dumps(results)}. Fournis un texte court et simple expliquant ce que cela signifie."
-        response = client.generate_content(prompt)
-        return response.text.strip()
+            prompt = f"Interprète ces résultats de test {test_type} : {json.dumps(results)}. Fournis un texte court et simple expliquant ce que cela signifie."
+            response = client.generate_content(prompt)
+            return response.text.strip()
+    except Exception as e:
+        logger.error(f"Erreur dans analyze_and_interpret : {str(e)}")
+        return f"Erreur lors de l'interprétation : {str(e)}"
 
-def create_temp_pdf(dataset_name: str, data: pd.DataFrame, exploration: Dict, corr_mat: pd.DataFrame, chi2_mat: pd.DataFrame, test_results: Dict, interpretations: Dict) -> str:
-    temp_pdf = f"temp_{dataset_name}_{int(time.time())}.pdf"
-    doc = SimpleDocTemplate(temp_pdf, pagesize=letter)
+def create_temp_pdf(dataset_name: str, data: pd.DataFrame, exploration: Dict, corr_mat: pd.DataFrame, chi2_mat: pd.DataFrame, test_results: Dict, interpretations: Dict, temp_dir: str) -> str:
+    temp_pdf_path = os.path.join(temp_dir, f"temp_{dataset_name}_{int(time.time())}.pdf")
+    doc = SimpleDocTemplate(temp_pdf_path, pagesize=letter)
     styles = getSampleStyleSheet()
     story = [
         Paragraph(f"Exploration de : {dataset_name}", styles['Title']),
@@ -346,23 +361,33 @@ def create_temp_pdf(dataset_name: str, data: pd.DataFrame, exploration: Dict, co
         story.append(Spacer(1, 12))
 
     if corr_mat is not None:
-        corr_img = f"temp_corr_{dataset_name}.png"
+        corr_img = os.path.join(temp_dir, f"corr_{dataset_name}.png")
         save_matrix_to_image(corr_mat, "Matrice de Corrélation", corr_img)
         story.append(Image(corr_img, width=400, height=300))
     if chi2_mat is not None:
-        chi2_img = f"temp_chi2_{dataset_name}.png"
+        chi2_img = os.path.join(temp_dir, f"chi2_{dataset_name}.png")
         save_matrix_to_image(chi2_mat, "Matrice Chi²", chi2_img, method='chi2')
         story.append(Image(chi2_img, width=400, height=300))
-    doc.build(story)
-    return temp_pdf
+    
+    try:
+        doc.build(story)
+        logger.info(f"PDF temporaire généré à {temp_pdf_path}")
+        return temp_pdf_path
+    except Exception as e:
+        logger.error(f"Erreur lors de la création du PDF : {str(e)}")
+        raise
 
 def generate_gemini_report(pdf_path: str) -> str:
-    with open(pdf_path, "rb") as f:
-        response = client.generate_content([
-            {"mime_type": "application/pdf", "data": f.read()},
-            "Analyse et résume ce rapport en français dans un style clair, structuré et professionnel."
-        ])
-    return re.sub(r'[#*]+', '', response.text)
+    try:
+        with open(pdf_path, "rb") as f:
+            response = client.generate_content([
+                {"mime_type": "application/pdf", "data": f.read()},
+                "Analyse et résume ce rapport en français dans un style clair, structuré et professionnel."
+            ])
+        return re.sub(r'[#*]+', '', response.text)
+    except Exception as e:
+        logger.error(f"Erreur dans generate_gemini_report : {str(e)}")
+        return f"Erreur lors de la génération du rapport : {str(e)}"
 
 def display_progressive_report(report: str) -> str:
     lines = report.split('\n')
@@ -397,7 +422,7 @@ def safe_dataframe_display(df: pd.DataFrame):
         df_safe[col] = df_safe[col].astype(str)
     return df_safe
 
-def preprocess_data(df: pd.DataFrame, features: list, target: str, encoding_method: str, normalization_method: str, modeling_type: str) -> Tuple[pd.DataFrame, pd.Series, list, Any]:
+def preprocess_data(df: pd.DataFrame, features: list, target: str, encoding_method: str, normalization_method: str, modeling_type: str, model_type: str) -> Tuple[pd.DataFrame, pd.Series, list, Any]:
     X = df[features].copy()
     y = df[target].copy() if modeling_type != "Clustering" else None
     transformer = None
@@ -408,20 +433,16 @@ def preprocess_data(df: pd.DataFrame, features: list, target: str, encoding_meth
 
     for col in X.columns:
         if col in categorical_cols:
-            try:
-                X[col] = pd.to_numeric(X[col], errors='raise')
+            if encoding_method == "Label Encoding":
+                le = LabelEncoder()
+                X[col] = le.fit_transform(X[col].astype(str))
                 processed_features.append(col)
-            except ValueError:
-                if encoding_method == "Label Encoding":
-                    le = LabelEncoder()
-                    X[col] = le.fit_transform(X[col].astype(str))
-                    processed_features.append(col)
-                elif encoding_method == "One-Hot Encoding":
-                    dummies = pd.get_dummies(X[col], prefix=col)
-                    X = pd.concat([X.drop(columns=[col]), dummies], axis=1)
-                    processed_features.extend(dummies.columns)
-                elif encoding_method == "Exclude":
-                    X = X.drop(columns=[col])
+            elif encoding_method == "One-Hot Encoding":
+                dummies = pd.get_dummies(X[col], prefix=col)
+                X = pd.concat([X.drop(columns=[col]), dummies], axis=1)
+                processed_features.extend(dummies.columns)
+            elif encoding_method == "Exclude":
+                X = X.drop(columns=[col])
         else:
             processed_features.append(col)
 
@@ -436,15 +457,15 @@ def preprocess_data(df: pd.DataFrame, features: list, target: str, encoding_meth
             scaler = MinMaxScaler()
             X[numeric_cols] = scaler.fit_transform(X[numeric_cols])
 
-    if modeling_type != "Clustering":
-        if y.dtype == 'object' and encoding_method != "Exclude":
-            try:
-                y = pd.to_numeric(y, errors='raise')
-            except ValueError:
-                le = LabelEncoder()
-                y = pd.Series(le.fit_transform(y.astype(str)), index=y.index)
-        X = X.dropna()
-        y = y.loc[X.index]  # Alignement avec X tout en restant une Series
+    if modeling_type == "Regression" and y is not None and y.dtype == 'object':
+        raise ValueError("La variable cible doit être numérique pour la régression. Utilisez la numérisation dans 'Traitement'.")
+    elif modeling_type == "Classification" and y is not None and y.dtype == 'object':
+        le = LabelEncoder()
+        y = pd.Series(le.fit_transform(y.astype(str)), index=y.index)
+
+    X = X.dropna()
+    if modeling_type != "Clustering" and y is not None:
+        y = y.loc[X.index]
 
     if modeling_type == "Regression" and "Polynomial" in model_type:
         transformer = PolynomialFeatures(degree=2)
@@ -455,21 +476,14 @@ def preprocess_data(df: pd.DataFrame, features: list, target: str, encoding_meth
 
 def train_model(df: pd.DataFrame, features: list, target: str, modeling_type: str, model_type: str, encoding_method: str, normalization_method: str) -> Tuple[Any, Dict, list, Any]:
     try:
-        X, y, processed_features, transformer = preprocess_data(df, features, target if modeling_type != "Clustering" else None, encoding_method, normalization_method, modeling_type)
-        
-        # Vérification de la compatibilité de la cible
-        if modeling_type == "Regression":
-            if y.dtype not in [np.float64, np.int64]:
-                raise ValueError("Erreur de l'utilisateur : La variable cible doit être numérique (ex. float ou int) pour la régression.")
-        elif modeling_type == "Classification":
-            if y.dtype in [np.float64, np.int64] and y.nunique() > 10:  # Seuil arbitraire pour éviter de confondre avec une variable continue
-                raise ValueError("Erreur de l'utilisateur : La variable cible doit être catégorique (ex. texte ou peu de valeurs uniques) pour la classification.")
+        X, y, processed_features, transformer = preprocess_data(df, features, target if modeling_type != "Clustering" else None, encoding_method, normalization_method, modeling_type, model_type)
         
         if len(X) < 2:
             raise ValueError("Pas assez de données pour l’entraînement après prétraitement.")
 
-        # Sélection du modèle selon le type de modélisation
         if modeling_type == "Regression":
+            if y.dtype not in [np.float64, np.int64]:
+                raise ValueError("Erreur de l'utilisateur : La variable cible doit être numérique pour la régression.")
             if model_type == "Linear Regression":
                 model = LinearRegression()
             elif model_type == "Polynomial Regression":
@@ -480,11 +494,19 @@ def train_model(df: pd.DataFrame, features: list, target: str, modeling_type: st
                 model = RandomForestRegressor()
             elif model_type == "XGBoost":
                 model = xgb.XGBRegressor()
+            elif model_type == "Stacking":
+                estimators = [("lr", LinearRegression()), ("rf", RandomForestRegressor()), ("xgb", xgb.XGBRegressor())]
+                model = StackingRegressor(estimators=estimators, final_estimator=LinearRegression())
+            elif model_type == "Voting":
+                estimators = [("lr", LinearRegression()), ("rf", RandomForestRegressor()), ("xgb", xgb.XGBRegressor())]
+                model = VotingRegressor(estimators=estimators)
             model.fit(X, y)
             y_pred = model.predict(X)
             metrics = {"R²": r2_score(y, y_pred), "MSE": mean_squared_error(y, y_pred)}
 
         elif modeling_type == "Classification":
+            if y.dtype in [np.float64, np.int64] and y.nunique() > 10:
+                raise ValueError("Erreur de l'utilisateur : La variable cible doit être catégorique pour la classification.")
             if model_type == "Decision Tree":
                 model = DecisionTreeClassifier()
             elif model_type == "Random Forest":
@@ -493,6 +515,12 @@ def train_model(df: pd.DataFrame, features: list, target: str, modeling_type: st
                 model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss')
             elif model_type == "Logistic Regression":
                 model = LogisticRegression()
+            elif model_type == "Stacking":
+                estimators = [("dt", DecisionTreeClassifier()), ("rf", RandomForestClassifier()), ("xgb", xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss'))]
+                model = StackingClassifier(estimators=estimators, final_estimator=LogisticRegression())
+            elif model_type == "Voting":
+                estimators = [("dt", DecisionTreeClassifier()), ("rf", RandomForestClassifier()), ("xgb", xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss'))]
+                model = VotingClassifier(estimators=estimators, voting='soft')
             model.fit(X, y)
             y_pred = model.predict(X)
             metrics = {"Accuracy": accuracy_score(y, y_pred)}
@@ -518,12 +546,12 @@ class DataPipeline:
         self.loader = DataLoader()
         self.explorer = DataExplorer()
 
-    def process(self, source: str, source_type: str, name: str, skip_header: bool = False, header_row: int = None) -> Tuple[pd.DataFrame, Dict, Dict]:
-        data, json_data = self.loader.load(source, source_type, skip_header, header_row)
+    def process(self, source: str, source_type: str, name: str, skip_header: bool = False, header_row: int = None, selected_sheets=None) -> Tuple[pd.DataFrame, Dict, bytes]:
+        data, raw_data = self.loader.load(source, source_type, skip_header, header_row, selected_sheets)
         if data is not None:
             exploration = self.explorer.explore(data)
-            return data, exploration, None
-        return None, None, json_data
+            return data, exploration, raw_data
+        return None, None, raw_data
 
 def main():
     st.title("🔍 Exploration, Analyse et Modélisation de Données")
@@ -532,19 +560,19 @@ def main():
     with st.sidebar:
         st.header("📥 Chargement des Données")
         st.info("Chargez vos données ici (URL, fichiers locaux, ou base de données).")
-        source_type = st.selectbox("Source", ["URL", "Fichiers Locaux", "Base de Données"], key="source_type_global", help="Choisissez la source des données.")
+        source_type = st.selectbox("Source", ["URL", "Fichiers Locaux", "Base de Données"], key="source_type_global")
 
         if source_type == "URL":
             num_datasets = st.number_input("Nombre de datasets", min_value=1, value=1, step=1, key="num_datasets_input")
             for i in range(num_datasets):
                 st.subheader(f"Dataset {i+1}")
-                source = st.text_input(f"URL {i+1}", "", key=f"source_url_{i}", help="Exemple : https://example.com/data.csv")
+                source = st.text_input(f"URL {i+1}", "", key=f"source_url_{i}")
                 name = st.text_input(f"Nom {i+1}", f"dataset_{i+1}", key=f"name_{i}")
                 skip_header = st.checkbox(f"Ignorer la première ligne {i+1}", value=False, key=f"skip_header_{i}")
-                header_row = st.number_input(f"Ligne comme en-tête {i+1}", min_value=0, value=0, step=1, key=f"header_row_{i}", help="0 pour la première ligne.")
+                header_row = st.number_input(f"Ligne comme en-tête {i+1}", min_value=0, value=0, step=1, key=f"header_row_{i}")
                 if st.button(f"📤 Charger {i+1}", key=f"load_{i}") and source and name:
                     logger.info(f"Chargement de {name} depuis URL {source}")
-                    data, exploration, json_data = pipeline.process(source, "url", name, skip_header, header_row)
+                    data, exploration, raw_data = pipeline.process(source, "url", name, skip_header, header_row)
                     if data is not None:
                         st.session_state['datasets'][name] = data
                         st.session_state['explorations'][name] = exploration
@@ -553,41 +581,45 @@ def main():
                         st.session_state['test_interpretations'][name] = {}
                         st.success(f"✅ '{name}' chargé ({len(data)} lignes)")
                         logger.info(f"Dataset {name} chargé avec succès ({len(data)} lignes)")
-                    elif json_data:
-                        st.session_state['json_data'][name] = json_data
+                    elif raw_data:
+                        st.session_state['json_data'][name] = raw_data
                         st.session_state['sources'][name] = (source, "url", skip_header, header_row)
                         st.info(f"📋 JSON '{name}' chargé.")
 
         elif source_type == "Fichiers Locaux":
             uploaded_files = st.file_uploader("Importer des fichiers", type=["csv", "xlsx", "json", "geojson", "txt", "gz", "zip", "shp", "shx", "dbf"], 
-                                             accept_multiple_files=True, key="multi_upload", help="Formats supportés : CSV, Excel, JSON, etc.")
+                                             accept_multiple_files=True, key="multi_upload")
             skip_header = st.checkbox("Ignorer la première ligne (CSV/TXT)", value=False, key="multi_skip_header")
             header_row = st.number_input("Ligne comme en-tête", min_value=0, value=0, step=1, key="multi_header_row")
             if uploaded_files and st.button("📤 Charger Tous", key="load_all"):
                 for uploaded_file in uploaded_files:
                     name = uploaded_file.name.split('.')[0]
                     logger.info(f"Chargement de {name} depuis fichier local")
-                    data, exploration, json_data = pipeline.process(uploaded_file, "file", name, skip_header, header_row)
+                    selected_sheets = None
+                    if uploaded_file.name.endswith('.xlsx'):
+                        xl = pd.ExcelFile(uploaded_file)
+                        selected_sheets = st.multiselect(f"Choisir les feuilles pour {name}", xl.sheet_names, default=xl.sheet_names[0], key=f"sheets_{name}")
+                    data, exploration, raw_data = pipeline.process(uploaded_file, "file", name, skip_header, header_row, selected_sheets)
                     if data is not None:
                         st.session_state['datasets'][name] = data
                         st.session_state['explorations'][name] = exploration
-                        st.session_state['sources'][name] = (uploaded_file, "file", skip_header, header_row)
+                        st.session_state['sources'][name] = (raw_data, "file", skip_header, header_row, uploaded_file.name)
                         st.session_state['test_results'][name] = {}
                         st.session_state['test_interpretations'][name] = {}
                         st.success(f"✅ '{name}' chargé ({len(data)} lignes)")
                         logger.info(f"Dataset {name} chargé avec succès ({len(data)} lignes)")
-                    elif json_data:
-                        st.session_state['json_data'][name] = json_data
-                        st.session_state['sources'][name] = (uploaded_file, "file", skip_header, header_row)
+                    elif raw_data:
+                        st.session_state['json_data'][name] = raw_data
+                        st.session_state['sources'][name] = (raw_data, "file", skip_header, header_row, uploaded_file.name)
                         st.info(f"📋 JSON '{name}' chargé.")
 
         elif source_type == "Base de Données":
-            db_url = st.text_input("URL de la base", key="db_url", help="Exemple : sqlite:///path.db")
+            db_url = st.text_input("URL de la base", key="db_url")
             query = st.text_area("Requête SQL", "SELECT * FROM table_name", key="db_query")
             name = st.text_input("Nom du dataset", "db_dataset", key="db_name")
             if st.button("📤 Charger", key="load_db"):
                 logger.info(f"Chargement de {name} depuis DB avec requête {query}")
-                data, exploration, json_data = pipeline.process((db_url, query), "db", name)
+                data, exploration, raw_data = pipeline.process((db_url, query), "db", name)
                 if data is not None:
                     st.session_state['datasets'][name] = data
                     st.session_state['explorations'][name] = exploration
@@ -602,11 +634,18 @@ def main():
         with col1:
             if st.button("🔄 Actualiser", key="refresh"):
                 logger.info("Actualisation des datasets")
-                for name, (source, source_type, skip_header, header_row) in st.session_state['sources'].items():
-                    data, exploration, json_data = pipeline.process(source, source_type, name, skip_header, header_row)
+                for name, (source, source_type, skip_header, header_row, *extra) in st.session_state['sources'].items():
+                    if source_type == "file":
+                        file_source = io.BytesIO(source)
+                        file_source.name = extra[0] if extra else name
+                        data, exploration, raw_data = pipeline.process(file_source, source_type, name, skip_header, header_row)
+                        if name in st.session_state['datasets']:
+                            data = st.session_state['datasets'][name]  # Conserver les données traitées
+                    else:
+                        data, exploration, raw_data = pipeline.process(source, source_type, name, skip_header, header_row)
                     if data is not None:
                         st.session_state['datasets'][name] = data
-                        st.session_state['explorations'][name] = exploration
+                        st.session_state['explorations'][name] = pipeline.explorer.explore(data)
                         st.session_state['test_results'][name] = {}
                         st.session_state['test_interpretations'][name] = {}
                     st.success("✅ Datasets actualisés")
@@ -623,12 +662,12 @@ def main():
         st.info("Sélectionnez et modifiez vos datasets ici.")
         if st.session_state['datasets']:
             dataset_names = list(st.session_state['datasets'].keys())
-            selected_datasets = st.multiselect("Datasets à traiter", dataset_names, default=dataset_names[0], key="select_datasets", help="Sélectionnez un ou plusieurs datasets.")
+            selected_datasets = st.multiselect("Datasets à traiter", dataset_names, default=dataset_names[0], key="select_datasets")
 
             if selected_datasets:
                 with st.expander("🔄 Conversion des Types"):
                     st.info("Convertissez les types de données.")
-                    col_to_convert = st.multiselect("Colonnes", set().union(*[set(st.session_state['datasets'][ds].columns) for ds in selected_datasets]), key="convert_cols", help="Choisissez les colonnes à convertir.")
+                    col_to_convert = st.multiselect("Colonnes", set().union(*[set(st.session_state['datasets'][ds].columns) for ds in selected_datasets]), key="convert_cols")
                     type_to_convert = st.selectbox("Type", ["Entier (int)", "Décimal (float)", "Catégorie (category)", "Date (datetime)", "Timestamp vers Date", "Extraire Mois", "Extraire Jour de la semaine", "Extraire Jour du mois", "Extraire Heure", "Extraire Année"], key="convert_type")
                     if st.button("✅ Appliquer", key="apply_convert"):
                         logger.info(f"Conversion de type pour {selected_datasets}")
@@ -671,7 +710,7 @@ def main():
                     st.info("Modifiez le contenu des colonnes.")
                     col_to_clean = st.selectbox("Colonne", set().union(*[set(st.session_state['datasets'][ds].columns) for ds in selected_datasets]), key="clean_col")
                     action = st.selectbox("Action", ["Supprimer des caractères", "Remplacer des caractères"], key="clean_action")
-                    pattern = st.text_input("Motif (regex)", key="clean_pattern", help="Exemple : [0-9] pour supprimer les chiffres.")
+                    pattern = st.text_input("Motif (regex)", key="clean_pattern")
                     replacement = st.text_input("Remplacement", "", key="clean_replace") if action == "Remplacer des caractères" else ""
                     if st.button("✅ Appliquer", key="apply_clean"):
                         logger.info(f"Nettoyage pour {selected_datasets}")
@@ -760,24 +799,26 @@ def main():
                                 logger.info(f"Colonne {new_col_name} créée pour {ds}")
 
                 with st.expander("🕳️ Traitement des Valeurs Manquantes"):
-                    col_to_fill = st.selectbox("Colonne", ["Toutes"] + list(set().union(*[set(st.session_state['datasets'][ds].columns) for ds in selected_datasets])), key="fill_col")
+                    cols_to_fill = st.multiselect("Colonnes", ["Toutes"] + list(set().union(*[set(st.session_state['datasets'][ds].columns) for ds in selected_datasets])), key="fill_cols")
                     fill_method = st.selectbox("Méthode", ["Supprimer les lignes", "Supprimer toutes lignes vides", "Remplacer par moyenne", "Remplacer par mode", "Plus proche voisin"], key="fill_method")
                     if st.button("✅ Traiter", key="apply_fill"):
                         logger.info(f"Traitement des valeurs manquantes pour {selected_datasets}")
                         for ds in selected_datasets:
                             data = st.session_state['datasets'][ds].copy()
-                            if col_to_fill == "Toutes" and fill_method == "Supprimer toutes lignes vides":
+                            if "Toutes" in cols_to_fill and fill_method == "Supprimer toutes lignes vides":
                                 data.dropna(how='all', inplace=True)
-                            elif col_to_fill in data.columns:
-                                if fill_method == "Supprimer les lignes":
-                                    data.dropna(subset=[col_to_fill], inplace=True)
-                                elif fill_method == "Remplacer par moyenne" and data[col_to_fill].dtype in [np.float64, np.int64]:
-                                    data[col_to_fill].fillna(data[col_to_fill].mean(), inplace=True)
-                                elif fill_method == "Remplacer par mode":
-                                    mode = data[col_to_fill].mode()
-                                    data[col_to_fill].fillna(mode[0] if not mode.empty else None, inplace=True)
-                                elif fill_method == "Plus proche voisin":
-                                    data[col_to_fill] = data[col_to_fill].interpolate(method='nearest').ffill().bfill()
+                            else:
+                                target_cols = [col for col in cols_to_fill if col != "Toutes" and col in data.columns]
+                                for col in target_cols:
+                                    if fill_method == "Supprimer les lignes":
+                                        data.dropna(subset=[col], inplace=True)
+                                    elif fill_method == "Remplacer par moyenne" and data[col].dtype in [np.float64, np.int64]:
+                                        data[col].fillna(data[col].mean(), inplace=True)
+                                    elif fill_method == "Remplacer par mode":
+                                        mode = data[col].mode()
+                                        data[col].fillna(mode[0] if not mode.empty else None, inplace=True)
+                                    elif fill_method == "Plus proche voisin":
+                                        data[col] = data[col].interpolate(method='nearest').ffill().bfill()
                             st.session_state['datasets'][ds] = data
                             st.session_state['explorations'][ds] = pipeline.explorer.explore(data)
                             st.success(f"✅ Valeurs manquantes traitées pour '{ds}'")
@@ -804,6 +845,42 @@ def main():
                                 st.session_state['explorations'][ds] = pipeline.explorer.explore(data)
                                 st.success(f"✅ Aberrants traités pour '{ds}'")
                                 logger.info(f"Aberrants traités pour {ds}")
+
+                with st.expander("🔢 Numérisation et Normalisation"):
+                    st.info("Prétraitez vos données avant modélisation.")
+                    cols_to_process = st.multiselect("Colonnes à traiter", set().union(*[set(st.session_state['datasets'][ds].columns) for ds in selected_datasets]), key="process_cols")
+                    encoding_method = st.selectbox("Méthode de numérisation", ["Label Encoding", "One-Hot Encoding", "Exclude"], key="encoding_method_pre")
+                    normalization_method = st.selectbox("Méthode de normalisation", ["None", "StandardScaler", "RobustScaler", "MinMaxScaler"], key="normalization_method_pre")
+                    if st.button("✅ Appliquer", key="apply_preprocess"):
+                        logger.info(f"Numérisation et normalisation pour {selected_datasets}")
+                        for ds in selected_datasets:
+                            data = st.session_state['datasets'][ds].copy()
+                            for col in cols_to_process:
+                                if col in data.columns:
+                                    if data[col].dtype == 'object':
+                                        if encoding_method == "Label Encoding":
+                                            le = LabelEncoder()
+                                            data[col] = le.fit_transform(data[col].astype(str))
+                                        elif encoding_method == "One-Hot Encoding":
+                                            dummies = pd.get_dummies(data[col], prefix=col)
+                                            data = pd.concat([data.drop(columns=[col]), dummies], axis=1)
+                                        elif encoding_method == "Exclude":
+                                            data.drop(columns=[col], inplace=True)
+                                    if normalization_method != "None" and data[col].dtype in [np.float64, np.int64]:
+                                        if normalization_method == "StandardScaler":
+                                            scaler = StandardScaler()
+                                            data[col] = scaler.fit_transform(data[[col]])
+                                        elif normalization_method == "RobustScaler":
+                                            scaler = RobustScaler()
+                                            data[col] = scaler.fit_transform(data[[col]])
+                                        elif normalization_method == "MinMaxScaler":
+                                            scaler = MinMaxScaler()
+                                            data[col] = scaler.fit_transform(data[[col]])
+                            st.session_state['datasets'][ds] = data
+                            st.session_state['explorations'][ds] = pipeline.explorer.explore(data)
+                            st.success(f"✅ Prétraitement appliqué pour '{ds}'")
+                            st.dataframe(data.head(), use_container_width=True)
+                            logger.info(f"Prétraitement appliqué pour {ds}")
 
                 with st.expander("🔗 Jointure de Datasets"):
                     if len(dataset_names) > 1:
@@ -886,7 +963,7 @@ def main():
                         var1 = st.selectbox("Variable 1", quant_cols, key="var1_select")
                     with col2:
                         var2 = st.selectbox("Variable 2", quant_cols, index=1, key="var2_select")
-                    submit_corr = st.form_submit_button(label="✅ Calculer", help="Calcule la force de la relation entre deux variables numériques (ex. température et humidité).")
+                    submit_corr = st.form_submit_button(label="✅ Calculer")
                 if submit_corr:
                     corr = correlation(data, var1, var2)
                     test_results["correlation"] = {"var1": var1, "var2": var2, **corr}
@@ -910,7 +987,7 @@ def main():
                         group_var = st.selectbox("Variable qualitative", qual_cols, key="group_select")
                     with col2:
                         value_var = st.selectbox("Variable quantitative", quant_cols, key="value_select")
-                    submit_multi = st.form_submit_button(label="✅ Effectuer", help="Compare une variable numérique (ex. ventes) entre groupes (ex. régions).")
+                    submit_multi = st.form_submit_button(label="✅ Effectuer")
                 if submit_multi:
                     multi = multivariate_tests(data, group_var, value_var)
                     test_results["multivariate"] = {"group_var": group_var, "value_var": value_var, **multi}
@@ -937,7 +1014,7 @@ def main():
                         chi_var1 = st.selectbox("Variable qualitative 1", qual_cols, key="chi_var1")
                     with col2:
                         chi_var2 = st.selectbox("Variable qualitative 2", qual_cols, index=1, key="chi_var2")
-                    submit_chi2 = st.form_submit_button(label="✅ Effectuer", help="Vérifie si deux variables catégoriques (ex. genre et préférence) sont liées.")
+                    submit_chi2 = st.form_submit_button(label="✅ Effectuer")
                 if submit_chi2 and chi_var1 != chi_var2:
                     chi2_results = chi2_test(data, chi_var1, chi_var2)
                     test_results["chi2"] = {"var1": chi_var1, "var2": chi_var2, **chi2_results}
@@ -966,7 +1043,7 @@ def main():
         with tab3:
             st.subheader("🧩 Les Liens en un Coup d’Œil")
             if len(quant_cols) > 1:
-                corr_method = st.selectbox("Méthode", ["pearson", "spearman"], key="corr_method", help="Pearson mesure les relations linéaires, Spearman les relations monotones.")
+                corr_method = st.selectbox("Méthode", ["pearson", "spearman"], key="corr_method")
                 corr_mat = correlation_matrix(data, method=corr_method)
                 if corr_mat is not None:
                     fig_corr = px.imshow(corr_mat, text_auto=".2f", aspect="equal", title=f"Matrice de Corrélation ({corr_method.capitalize()})", color_continuous_scale="RdBu_r", zmin=-1, zmax=1)
@@ -987,16 +1064,17 @@ def main():
             st.subheader("🤖 Prédictions et Magie IA")
             if len(data.columns) > 1:
                 features = st.multiselect("Variables explicatives", data.columns, key="model_features")
-                target = st.selectbox("Variable cible", data.columns, key="model_target") if "Clustering" not in st.session_state.get('modeling_type', '') else None
+                available_targets = [col for col in data.columns if col not in features]
+                target = st.selectbox("Variable cible", available_targets, key="model_target") if "Clustering" not in st.session_state.get('modeling_type', '') else None
                 modeling_type = st.selectbox("Type de modélisation", ["Regression", "Classification", "Clustering"], key="modeling_type")
                 model_options = {
-                    "Regression": ["Linear Regression", "Polynomial Regression", "Decision Tree", "Random Forest", "XGBoost"],
-                    "Classification": ["Decision Tree", "Random Forest", "XGBoost", "Logistic Regression"],
+                    "Regression": ["Linear Regression", "Polynomial Regression", "Decision Tree", "Random Forest", "XGBoost", "Stacking", "Voting"],
+                    "Classification": ["Decision Tree", "Random Forest", "XGBoost", "Logistic Regression", "Stacking", "Voting"],
                     "Clustering": ["K-Means"]
                 }
                 model_type = st.selectbox("Modèle", model_options[modeling_type], key="model_type")
-                encoding_method = st.selectbox("Méthode de numérisation", ["Label Encoding", "One-Hot Encoding", "Exclude"], key="encoding_method", help="Gérer les colonnes non numériques")
-                normalization_method = st.selectbox("Méthode de normalisation", ["None", "StandardScaler", "RobustScaler", "MinMaxScaler"], key="normalization_method", help="Normaliser les données numériques")
+                encoding_method = st.selectbox("Méthode de numérisation", ["Label Encoding", "One-Hot Encoding", "Exclude"], key="encoding_method")
+                normalization_method = st.selectbox("Méthode de normalisation", ["None", "StandardScaler", "RobustScaler", "MinMaxScaler"], key="normalization_method")
                 if st.button("✅ Entraîner", key="train_model"):
                     logger.info(f"Entraînement de {model_type} ({modeling_type}) sur {dataset_to_analyze}")
                     model, metrics, processed_features, transformer = train_model(data, features, target if modeling_type != "Clustering" else None, modeling_type, model_type, encoding_method, normalization_method)
@@ -1007,7 +1085,7 @@ def main():
                         for k, v in metrics.items():
                             st.write(f"{k}: {v:.4f}")
                         try:
-                            X_processed, y_processed, _, _ = preprocess_data(data, features, target if modeling_type != "Clustering" else None, encoding_method, normalization_method, modeling_type)
+                            X_processed, y_processed, _, _ = preprocess_data(data, features, target if modeling_type != "Clustering" else None, encoding_method, normalization_method, modeling_type, model_type)
                             if modeling_type == "Regression":
                                 fig_pred = px.scatter(x=y_processed, y=model.predict(X_processed), labels={"x": "Réel", "y": "Prédit"}, title=f"Prédictions ({model_type})")
                                 st.plotly_chart(fig_pred)
@@ -1017,7 +1095,11 @@ def main():
                             elif modeling_type == "Clustering":
                                 fig_cluster = px.scatter(data_frame=X_processed, x=processed_features[0], y=processed_features[1] if len(processed_features) > 1 else processed_features[0], color=model.predict(X_processed), title="Clusters K-Means")
                                 st.plotly_chart(fig_cluster)
-                            st.download_button("💾 Sauvegarder le modèle", data=joblib.dump(model, f"{dataset_to_analyze}_{model_type}.pkl")[0], file_name=f"{dataset_to_analyze}_{model_type}.pkl", key="download_model")
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".pkl") as tmp:
+                                joblib.dump(model, tmp.name)
+                                with open(tmp.name, "rb") as f:
+                                    st.download_button("💾 Sauvegarder le modèle", data=f, file_name=f"{dataset_to_analyze}_{model_type}.pkl", key="download_model")
+                                os.remove(tmp.name)
                             logger.info(f"Modèle {model_type} entraîné pour {dataset_to_analyze}")
                         except Exception as e:
                             error_msg = f"Erreur lors de la visualisation des prédictions : {str(e)}"
@@ -1026,28 +1108,39 @@ def main():
                             st.error(error_explanation)
 
         if st.button("📝 Générer un rapport", key="generate_report"):
-            logger.info(f"Génération de rapport pour {dataset_to_analyze}")
-            corr_mat = correlation_matrix(data) if len(quant_cols) > 1 else None
-            chi2_mat = chi2_matrix(data) if len(qual_cols) > 1 else None
-            temp_pdf = create_temp_pdf(dataset_to_analyze, data, exploration, corr_mat, chi2_mat, test_results, test_interpretations)
-            report = generate_gemini_report(temp_pdf)
-            st.session_state['chat_history'] = [("", report)]
-            os.remove(temp_pdf)
-            if corr_mat is not None and os.path.exists(f"temp_corr_{dataset_to_analyze}.png"):
-                os.remove(f"temp_corr_{dataset_to_analyze}.png")
-            if chi2_mat is not None and os.path.exists(f"temp_chi2_{dataset_to_analyze}.png"):
-                os.remove(f"temp_chi2_{dataset_to_analyze}.png")
-            logger.info(f"Rapport généré pour {dataset_to_analyze}")
+            with tempfile.TemporaryDirectory() as temp_dir:
+                logger.info(f"Génération de rapport pour {dataset_to_analyze}")
+                corr_mat = correlation_matrix(data) if len(quant_cols) > 1 else None
+                chi2_mat = chi2_matrix(data) if len(qual_cols) > 1 else None
+                try:
+                    temp_pdf = create_temp_pdf(dataset_to_analyze, data, exploration, corr_mat, chi2_mat, test_results, test_interpretations, temp_dir)
+                    report = generate_gemini_report(temp_pdf)
+                    st.session_state['chat_history'] = [("", report)]
+                    st.success("Rapport généré avec succès !")
+                    logger.info(f"Rapport généré pour {dataset_to_analyze}")
+                except Exception as e:
+                    error_msg = f"Erreur lors de la génération du rapport : {str(e)}"
+                    logger.error(error_msg, exc_info=True)
+                    st.error(error_msg)
 
-        if st.session_state['chat_history']:
-            st.markdown("<h3>💬 Rapport d’analyse</h3>", unsafe_allow_html=True)
-            report_text = display_progressive_report(st.session_state['chat_history'][0][1])
-            pdf_data = create_downloadable_pdf(dataset_to_analyze, report_text)
-            st.download_button(label="📄 Télécharger le rapport en PDF", data=pdf_data, file_name=f"rapport_{dataset_to_analyze}.pdf", mime="application/pdf", key="download_report")
+                if st.session_state['chat_history']:
+                    st.markdown("<div class='section-box'><h2>📜 Rapport Généré</h2>", unsafe_allow_html=True)
+                    report = display_progressive_report(st.session_state['chat_history'][-1][1])
+                    pdf_bytes = create_downloadable_pdf(dataset_to_analyze, report)
+                    st.download_button(
+                        label="💾 Télécharger le Rapport en PDF",
+                        data=pdf_bytes,
+                        file_name=f"rapport_{dataset_to_analyze}.pdf",
+                        mime="application/pdf",
+                        key="download_report"
+                    )
+                    st.markdown("</div>", unsafe_allow_html=True)
 
-        st.session_state['test_results'][dataset_to_analyze] = test_results
-        st.session_state['test_interpretations'][dataset_to_analyze] = test_interpretations
-        st.markdown("</div>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)  # Fin de la section-box Exploration, Visualisation et Modélisation
+
+        else:
+            st.info("Chargez un dataset depuis la barre latérale pour commencer l'exploration.")
 
 if __name__ == "__main__":
     main()
+
