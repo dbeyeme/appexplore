@@ -37,6 +37,7 @@ from sklearn.cluster import KMeans
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error, r2_score, accuracy_score
 import joblib
+
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -50,11 +51,13 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger()
+
 user_id = "user_default"
 extra = {"user": user_id}
 logger = logging.LoggerAdapter(logger, extra)
 
 # Initialisation de l’état de session
+
 def initialize_session_state():
     keys = ['datasets', 'explorations', 'sources', 'json_data', 'chat_history', 
             'test_results', 'test_interpretations', 'models', 'preprocessed_data', 
@@ -74,6 +77,7 @@ except Exception as e:
     logger.error(f"Erreur configuration Gemini API: {str(e)}")
     st.error("Erreur de configuration de l'API Gemini. Veuillez vérifier la clé API.")
 
+
 # CSS pour l'interface
 st.markdown("""
     <style>
@@ -91,10 +95,12 @@ class DataLoader:
         self.supported_extensions = ['csv', 'txt', 'xlsx', 'xls', 'json', 'geojson', 'gz', 'zip', 'shp']
 
     def detect_delimiter(self, content: str) -> str:
+
         try:
             if not content.strip():
                 raise ValueError("Fichier vide")
             sniffer = csv.Sniffer()
+
             return sniffer.sniff(content[:1024]).delimiter
         except:
             for delim in [',', ';', '\t', '|']:
@@ -103,6 +109,7 @@ class DataLoader:
             return ','
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+
     def load(self, source, source_type, skip_header=False, header_row=None, selected_sheets=None):
         """
         Charge les données à partir d'une source (URL, fichier, ou base de données).
@@ -320,7 +327,7 @@ class DataLoader:
                 response = client.generate_content(prompt)
                 return response.text.strip()
         except Exception as e:
-            return f"Erreur interprétation: {str(e)}. Détails : {error if error else 'Aucune erreur spécifiée'}"
+
 
 class DataExplorer:
     @staticmethod
@@ -333,15 +340,18 @@ class DataExplorer:
             "missing_values": df.isnull().sum().to_dict(),
             "missing_percent": (df.isnull().sum() / len(df) * 100).to_dict(),
             "description": df.describe(include='all'),
+
             "outliers": {col: len(df[(df[col] < df[col].quantile(0.25) - 1.5*(df[col].quantile(0.75) - df[col].quantile(0.25))) | 
                                    (df[col] > df[col].quantile(0.75) + 1.5*(df[col].quantile(0.75) - df[col].quantile(0.25)))][col])
                         for col in df.select_dtypes(include=np.number).columns},
             "unique_values": {col: df[col].nunique() for col in df.columns},
             "sample": df.head().to_dict()
+
         }
 
 def correlation(df: pd.DataFrame, var1: str, var2: str) -> Dict[str, float]:
     results = {}
+
     if var1 not in df.columns or var2 not in df.columns:
         results["error"] = "Variable(s) non trouvée(s)"
         return results
@@ -352,41 +362,50 @@ def correlation(df: pd.DataFrame, var1: str, var2: str) -> Dict[str, float]:
     if len(df_clean) < 2:
         results["error"] = "Pas assez de données valides"
         return results
+
     if df_clean[var1].dtype in [np.float64, np.int64] and df_clean[var2].dtype in [np.float64, np.int64]:
         try:
             results["pearson"] = stats.pearsonr(df_clean[var1], df_clean[var2])[0]
             results["spearman"] = stats.spearmanr(df_clean[var1], df_clean[var2])[0]
             results["kendall"] = stats.kendalltau(df_clean[var1], df_clean[var2])[0]
         except Exception as e:
+
             results["error"] = f"Erreur calcul: {str(e)}"
     else:
         results["error"] = "Variables doivent être numériques"
+
     return results
 
 def chi2_test(df: pd.DataFrame, var1: str, var2: str) -> Dict[str, Any]:
     results = {}
+
     if var1 not in df.columns or var2 not in df.columns or var1 == var2:
         results["error"] = "Variables invalides ou identiques"
         return results
     contingency_table = pd.crosstab(df[var1], df[var2])
     if contingency_table.empty or contingency_table.size == 0:
         results["error"] = "Pas assez de données croisées"
+
         return results
     try:
         chi2, p, dof, expected = stats.chi2_contingency(contingency_table)
         results.update({"chi2": chi2, "p_value": p, "dof": dof, "expected": expected.tolist()})
     except Exception as e:
+
         results["error"] = f"Erreur Chi²: {str(e)}"
+
     return results
 
 def multivariate_tests(df: pd.DataFrame, group_var: str, value_var: str) -> Dict[str, Any]:
     results = {}
     if group_var not in df.columns or value_var not in df.columns:
+
         results["error"] = "Variable(s) non trouvée(s)"
         return results
     groups = [group[1][value_var].dropna() for group in df.groupby(group_var)]
     if len(groups) <= 1 or df[value_var].dtype not in [np.float64, np.int64]:
         results["error"] = "Données insuffisantes ou non numériques"
+
         return results
     try:
         results["anova"] = stats.f_oneway(*groups)
@@ -398,7 +417,9 @@ def multivariate_tests(df: pd.DataFrame, group_var: str, value_var: str) -> Dict
         results["kurtosis"] = df[value_var].kurtosis()
         results["skewness"] = df[value_var].skew()
     except Exception as e:
+
         results["error"] = f"Erreur tests: {str(e)}"
+
     return results
 
 def correlation_matrix(df: pd.DataFrame, method: str = 'pearson') -> pd.DataFrame:
@@ -426,13 +447,16 @@ def save_matrix_to_image(matrix: pd.DataFrame, title: str, filename: str, method
         plt.title(title)
         plt.savefig(filename, dpi=300, bbox_inches='tight')
         plt.close()
+
     except Exception as e:
         logger.error(f"Erreur sauvegarde matrice: {str(e)}")
+
         raise
 
 def analyze_and_interpret(test_type: str, results: Dict, error: str = None, is_user_error: bool = False) -> str:
     try:
         if error:
+
             prompt = f"{'Erreur utilisateur' if is_user_error else 'Erreur interne'}: '{error}'. Explique clairement."
             response = client.generate_content(prompt)
             return response.text.strip()
@@ -446,6 +470,7 @@ def analyze_and_interpret(test_type: str, results: Dict, error: str = None, is_u
 def create_temp_pdf(dataset_name: str, data: pd.DataFrame, exploration: Dict, 
                    corr_mat: pd.DataFrame, chi2_mat: pd.DataFrame, test_results: Dict, 
                    interpretations: Dict, temp_dir: str) -> str:
+
     temp_pdf_path = os.path.join(temp_dir, f"temp_{dataset_name}_{int(time.time())}.pdf")
     doc = SimpleDocTemplate(temp_pdf_path, pagesize=letter)
     styles = getSampleStyleSheet()
@@ -490,9 +515,11 @@ def create_temp_pdf(dataset_name: str, data: pd.DataFrame, exploration: Dict,
         save_matrix_to_image(chi2_mat, "Matrice Chi²", chi2_img, method='chi2')
         story.append(Image(chi2_img, width=400, height=300))
     
+
     doc.build(story)
     logger.info(f"PDF temporaire généré à {temp_pdf_path}")
     return temp_pdf_path
+
 
 def generate_gemini_report(pdf_path: str) -> str:
     try:
@@ -501,11 +528,13 @@ def generate_gemini_report(pdf_path: str) -> str:
                 {"mime_type": "application/pdf", "data": f.read()},
                 "Analyse et résume ce rapport en français dans un style clair, structuré et professionnel."
             ])
+
         logger.info("Rapport Gemini généré avec succès")
         return re.sub(r'[#*]+', '', response.text)
     except Exception as e:
         logger.error(f"Erreur génération rapport: {str(e)}")
         return f"Erreur génération rapport: {str(e)}"
+
 
 def display_progressive_report(report: str) -> str:
     lines = report.split('\n')
@@ -540,8 +569,10 @@ def safe_dataframe_display(df: pd.DataFrame):
         df_safe[col] = df_safe[col].astype(str)
     return df_safe
 
+
 def preprocess_data(df: pd.DataFrame, features: list, target: str, encoding_method: str, 
                    normalization_method: str, modeling_type: str, model_type: str) -> Tuple[pd.DataFrame, pd.Series, list, Any]:
+
     X = df[features].copy()
     y = df[target].copy() if modeling_type != "Clustering" else None
     transformer = None
@@ -577,7 +608,9 @@ def preprocess_data(df: pd.DataFrame, features: list, target: str, encoding_meth
             X[numeric_cols] = scaler.fit_transform(X[numeric_cols])
 
     if modeling_type == "Regression" and y is not None and y.dtype == 'object':
+
         raise ValueError("La variable cible doit être numérique pour la régression")
+
     elif modeling_type == "Classification" and y is not None and y.dtype == 'object':
         le = LabelEncoder()
         y = pd.Series(le.fit_transform(y.astype(str)), index=y.index)
@@ -592,6 +625,7 @@ def preprocess_data(df: pd.DataFrame, features: list, target: str, encoding_meth
         processed_features = transformer.get_feature_names_out(input_features=processed_features).tolist()
 
     return X, y, processed_features, transformer
+
 
 def train_model(df: pd.DataFrame, features: list, target: str, modeling_type: str, 
                 model_type: str, encoding_method: str, normalization_method: str) -> Tuple[Any, Dict, list, Any]:
@@ -616,12 +650,14 @@ def train_model(df: pd.DataFrame, features: list, target: str, modeling_type: st
                 "Voting": VotingRegressor(estimators=[("lr", LinearRegression()), ("rf", RandomForestRegressor()), ("xgb", xgb.XGBRegressor())])
             }
             model = model_options[model_type]
+
             model.fit(X, y)
             y_pred = model.predict(X)
             metrics = {"R²": r2_score(y, y_pred), "MSE": mean_squared_error(y, y_pred)}
 
         elif modeling_type == "Classification":
             if y.dtype in [np.float64, np.int64] and y.nunique() > 10:
+
                 raise ValueError("La cible doit être catégorique pour la classification")
             model_options = {
                 "Decision Tree": DecisionTreeClassifier(),
@@ -635,29 +671,37 @@ def train_model(df: pd.DataFrame, features: list, target: str, modeling_type: st
                                                       ("xgb", xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss'))], voting='soft')
             }
             model = model_options[model_type]
+
             model.fit(X, y)
             y_pred = model.predict(X)
             metrics = {"Accuracy": accuracy_score(y, y_pred)}
 
         elif modeling_type == "Clustering":
+
             model = KMeans(n_clusters=3) if model_type == "K-Means" else None
+
             model.fit(X)
             y_pred = model.predict(X)
             metrics = {"Inertia": model.inertia_}
 
+
         logger.info(f"Modèle {model_type} ({modeling_type}) entraîné avec succès")
+
         return model, metrics, processed_features, transformer
 
     except Exception as e:
         error_msg = str(e)
+
         logger.error(f"Erreur entraînement: {error_msg}", exc_info=True)
         st.error(analyze_and_interpret("training", None, error_msg, is_user_error="Erreur de l'utilisateur" in error_msg))
+
         return None, {}, [], None
 
 class DataPipeline:
     def __init__(self):
         self.loader = DataLoader()
         self.explorer = DataExplorer()
+
 
     def process(self, source: str, source_type: str, name: str, skip_header: bool = False, 
                 header_row: int = None, selected_sheets=None) -> Tuple[pd.DataFrame, Dict, bytes]:
@@ -691,12 +735,14 @@ def restore_state(timestamp):
 
 def main():
     initialize_session_state()
+
     pipeline = DataPipeline()
 
     st.title("🔍 Exploration, Analyse et Modélisation de Données")
 
     with st.sidebar:
         st.header("📥 Chargement des Données")
+
         source_type = st.selectbox("Source", ["URL", "Fichiers Locaux", "Base de Données"], key="source_type_select")
 
         if source_type == "URL":
@@ -762,6 +808,7 @@ def main():
             name = st.text_input("Nom du dataset", "db_dataset", key="db_name_input")
             if st.button("📤 Charger", key="load_db"):
                 backup_state()
+
                 data, exploration, raw_data = pipeline.process((db_url, query), "db", name)
                 if data is not None:
                     st.session_state['datasets'][name] = data
@@ -770,12 +817,16 @@ def main():
                     st.session_state['test_results'][name] = {}
                     st.session_state['test_interpretations'][name] = {}
                     st.success(f"✅ '{name}' chargé ({len(data)} lignes)")
+
                     logger.info(f"Dataset {name} chargé avec succès depuis DB")
+
 
         st.markdown("---")
         col1, col2 = st.columns(2)
         with col1:
+
             if st.button("🔄 Actualiser", key="refresh_datasets"):
+
                 logger.info("Actualisation des datasets")
                 for name, (source, source_type, skip_header, header_row, *extra) in st.session_state['sources'].items():
                     if source_type == "file":
@@ -791,6 +842,7 @@ def main():
                         st.session_state['explorations'][name] = pipeline.explorer.explore(data)
                         st.session_state['test_results'][name] = {}
                         st.session_state['test_interpretations'][name] = {}
+
                 st.success("✅ Datasets actualisés")
         with col2:
             if st.button("🗑️ Réinitialiser", key="reset_app"):
@@ -809,9 +861,11 @@ def main():
                 if restore_state(backup_times[[time.ctime(t) for t in backup_times].index(selected_backup)]):
                     st.success("État restauré")
 
+
         st.header("⚙️ Gestion des Datasets")
         if st.session_state['datasets']:
             dataset_names = list(st.session_state['datasets'].keys())
+
             selected_datasets = st.multiselect("Datasets à traiter", dataset_names, default=dataset_names[0], key="datasets_to_process")
 
             if selected_datasets:
@@ -822,6 +876,7 @@ def main():
                                                   key="convert_type_select")
                     if st.button("✅ Appliquer", key="apply_conversion_types"):
                         backup_state()
+
                         for ds in selected_datasets:
                             data = st.session_state['datasets'][ds].copy()
                             for col in col_to_convert:
@@ -850,6 +905,7 @@ def main():
                                         st.session_state['datasets'][ds] = data
                                         st.session_state['explorations'][ds] = pipeline.explorer.explore(data)
                                         st.success(f"✅ Conversion appliquée pour '{ds}'")
+
                                     except Exception as e:
                                         st.error(analyze_and_interpret("conversion", None, str(e), True))
 
@@ -860,6 +916,7 @@ def main():
                     replacement = st.text_input("Remplacement", "", key="clean_replacement_input") if action == "Remplacer des caractères" else ""
                     if st.button("✅ Appliquer", key="apply_clean_values"):
                         backup_state()
+
                         for ds in selected_datasets:
                             data = st.session_state['datasets'][ds].copy()
                             if col_to_clean in data.columns:
@@ -871,10 +928,12 @@ def main():
                                 st.session_state['explorations'][ds] = pipeline.explorer.explore(data)
                                 st.success(f"✅ Nettoyage appliqué pour '{ds}'")
 
+
                 with st.expander("🗑️ Suppression de Colonnes"):
                     cols_to_drop = st.multiselect("Colonnes", set().union(*[set(st.session_state['datasets'][ds].columns) for ds in selected_datasets]), key="drop_columns_multiselect")
                     if st.button("✅ Supprimer", key="apply_drop_columns"):
                         backup_state()
+
                         for ds in selected_datasets:
                             data = st.session_state['datasets'][ds].copy()
                             data.drop(columns=[col for col in cols_to_drop if col in data.columns], inplace=True)
@@ -882,12 +941,14 @@ def main():
                             st.session_state['explorations'][ds] = pipeline.explorer.explore(data)
                             st.success(f"✅ Colonnes supprimées pour '{ds}'")
 
+
                 with st.expander("🚫 Suppression de Lignes"):
                     col_to_filter = st.selectbox("Colonne", set().union(*[set(st.session_state['datasets'][ds].columns) for ds in selected_datasets]), key="filter_column_select")
                     filter_expr = st.text_input("Expression (ex. 'Station_1')", key="filter_expr_input")
                     filter_type = st.selectbox("Type", ["Valeur exacte", "Regex"], key="filter_type_select")
                     if st.button("✅ Supprimer", key="apply_drop_rows"):
                         backup_state()
+
                         for ds in selected_datasets:
                             data = st.session_state['datasets'][ds].copy()
                             if col_to_filter in data.columns:
@@ -898,6 +959,7 @@ def main():
                                 st.session_state['datasets'][ds] = data
                                 st.session_state['explorations'][ds] = pipeline.explorer.explore(data)
                                 st.success(f"✅ Lignes supprimées pour '{ds}'")
+
 
                 with st.expander("➕ Création de Colonne"):
                     new_col_name = st.text_input("Nom", key="new_col_name_input")
@@ -912,6 +974,7 @@ def main():
                         new_col_replace = st.text_input("Remplacement", "", key="new_col_replace_input")
                     if st.button("✅ Créer", key="apply_create_column"):
                         backup_state()
+
                         for ds in selected_datasets:
                             data = st.session_state['datasets'][ds].copy()
                             if base_col in data.columns:
@@ -942,12 +1005,14 @@ def main():
                                 st.session_state['explorations'][ds] = pipeline.explorer.explore(data)
                                 st.success(f"✅ '{new_col_name}' créé pour '{ds}'")
 
+
                 with st.expander("🕳️ Traitement des Valeurs Manquantes"):
                     cols_to_fill = st.multiselect("Colonnes", ["Toutes"] + list(set().union(*[set(st.session_state['datasets'][ds].columns) for ds in selected_datasets])), key="fill_missing_columns")
                     fill_method = st.selectbox("Méthode", ["Supprimer les lignes", "Supprimer toutes lignes vides", "Remplacer par moyenne", "Remplacer par mode", "Plus proche voisin"],
                                               key="fill_method_select")
                     if st.button("✅ Traiter", key="apply_fill_missing"):
                         backup_state()
+
                         for ds in selected_datasets:
                             data = st.session_state['datasets'][ds].copy()
                             if "Toutes" in cols_to_fill and fill_method == "Supprimer toutes lignes vides":
@@ -968,12 +1033,14 @@ def main():
                             st.session_state['explorations'][ds] = pipeline.explorer.explore(data)
                             st.success(f"✅ Valeurs manquantes traitées pour '{ds}'")
 
+
                 with st.expander("⚠️ Traitement des Valeurs Aberrantes"):
                     col_to_outlier = st.selectbox("Colonne", set().union(*[set(st.session_state['datasets'][ds].select_dtypes(include=np.number).columns) for ds in selected_datasets]),
                                                  key="outlier_column_select")
                     outlier_method = st.selectbox("Méthode", ["Supprimer (IQR)", "Remplacer par médiane", "Limiter (IQR)"], key="outlier_method_select")
                     if st.button("✅ Traiter", key="apply_handle_outliers"):
                         backup_state()
+
                         for ds in selected_datasets:
                             data = st.session_state['datasets'][ds].copy()
                             if col_to_outlier in data.columns and data[col_to_outlier].dtype in [np.float64, np.int64]:
@@ -990,6 +1057,7 @@ def main():
                                 st.session_state['explorations'][ds] = pipeline.explorer.explore(data)
                                 st.success(f"✅ Aberrants traités pour '{ds}'")
 
+
                 with st.expander("🔗 Jointure de Datasets"):
                     if len(dataset_names) > 1:
                         left_ds = st.selectbox("Dataset principal", selected_datasets, key="join_left_ds_select")
@@ -999,6 +1067,7 @@ def main():
                         join_type = st.selectbox("Type", ["inner", "left", "right", "outer"], key="join_type_select")
                         if st.button("✅ Joindre", key="apply_join_datasets"):
                             backup_state()
+
                             data = st.session_state['datasets'][left_ds].merge(st.session_state['datasets'][right_ds], how=join_type, left_on=col_main, right_on=col_second)
                             new_name = f"{left_ds}_joined_{right_ds}"
                             st.session_state['datasets'][new_name] = data
@@ -1058,7 +1127,8 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<div class='section-box'><h2>📊 Exploration, Visualisation et Modélisation</h2>", unsafe_allow_html=True)
-        dataset_to_analyze = st.selectbox("Dataset à analyser", list(st.session_state['datasets'].keys()), key="analyze_dataset_select")
+
+
         data = st.session_state['datasets'][dataset_to_analyze]
         exploration = st.session_state['explorations'][dataset_to_analyze]
         test_results = st.session_state['test_results'][dataset_to_analyze]
@@ -1068,6 +1138,8 @@ def main():
         st.dataframe(safe_dataframe_display(data.head()), use_container_width=True)
 
         with st.expander("📈 Exploration"):
+
+
             st.write(f"**Nom du dataset :** {dataset_to_analyze}")
             st.write("**Métadonnées :**")
             st.dataframe(pd.DataFrame(exploration["metadata"].items(), columns=["Colonne", "Type"]))
@@ -1075,15 +1147,19 @@ def main():
             st.write("**Valeurs uniques :**")
             st.dataframe(pd.DataFrame(exploration["unique_values"].items(), columns=["Colonne", "Nb unique"]))
             st.write("**Valeurs manquantes :**")
+
             missing_df = pd.DataFrame({"Colonne": exploration["missing_values"].keys(), "Nb manquants": exploration["missing_values"].values(), 
                                      "Pourcentage (%)": [f"{v:.2f}" for v in exploration["missing_percent"].values()]})
+
             st.dataframe(missing_df[missing_df["Nb manquants"] > 0]) if missing_df["Nb manquants"].sum() > 0 else st.write("Aucune valeur manquante")
             st.write("**Statistiques descriptives :**")
             st.dataframe(exploration["description"])
             st.write("**Valeurs aberrantes (IQR) :**")
             st.dataframe(pd.DataFrame(exploration["outliers"].items(), columns=["Colonne", "Nb aberrants"]))
 
+
         st.download_button(label="💾 Télécharger en CSV", data=data.to_csv(index=False), file_name=f"{dataset_to_analyze}.csv", mime="text/csv", key="download_csv_button")
+
 
         tab1, tab2, tab3, tab4 = st.tabs([
             "🎨 Premiers Pas : Découvrez Vos Données",
@@ -1095,29 +1171,36 @@ def main():
         qual_cols = data.select_dtypes(include=['object', 'category']).columns
 
         with tab1:
+
             if len(quant_cols) > 0:
                 col_hist = st.selectbox("Colonne pour histogramme", quant_cols, key="hist_column_select")
                 fig_hist = px.histogram(data, x=col_hist, title=f"Distribution de {col_hist}", nbins=50, marginal="box")
                 st.plotly_chart(fig_hist, use_container_width=True)
             if len(qual_cols) > 0:
                 qual_col = st.selectbox("Variable qualitative", qual_cols, key="bar_qual_column_select")
+
                 fig_bar = px.histogram(data, x=qual_col, title=f"Répartition de {qual_col}", color=qual_col)
                 st.plotly_chart(fig_bar, use_container_width=True)
 
         with tab2:
+
             if len(quant_cols) > 1:
                 with st.form(key='corr_form'):
                     col1, col2 = st.columns(2)
                     with col1:
+
                         var1 = st.selectbox("Variable 1", quant_cols, key="corr_var1_select")
                     with col2:
                         var2 = st.selectbox("Variable 2", quant_cols, index=1, key="corr_var2_select")
+
                     submit_corr = st.form_submit_button(label="✅ Calculer")
                 if submit_corr:
                     corr = correlation(data, var1, var2)
                     test_results["correlation"] = {"var1": var1, "var2": var2, **corr}
                     if "error" in corr:
+
                         st.error(analyze_and_interpret("correlation", None, corr["error"], True))
+
                     else:
                         st.write(f"**Pearson :** {corr.get('pearson', 'N/A'):.3f}")
                         st.write(f"**Spearman :** {corr.get('spearman', 'N/A'):.3f}")
@@ -1125,26 +1208,32 @@ def main():
                         interpretation = analyze_and_interpret("correlation", corr)
                         test_interpretations["correlation"] = interpretation
                         st.write(f"**Interprétation :** {interpretation}")
+
                         fig_scatter = px.scatter(data, x=var1, y=var2, trendline="ols", title=f"Corrélation : {var1} vs {var2}")
+
                         st.plotly_chart(fig_scatter, use_container_width=True)
 
             if len(qual_cols) > 0 and len(quant_cols) > 0:
                 with st.form(key='multi_form'):
                     col1, col2 = st.columns(2)
                     with col1:
+
                         group_var = st.selectbox("Variable qualitative", qual_cols, key="multi_group_var_select")
                     with col2:
                         value_var = st.selectbox("Variable quantitative", quant_cols, key="multi_value_var_select")
+
                     submit_multi = st.form_submit_button(label="✅ Effectuer")
                 if submit_multi:
                     multi = multivariate_tests(data, group_var, value_var)
                     test_results["multivariate"] = {"group_var": group_var, "value_var": value_var, **multi}
                     if "error" in multi:
+
                         st.error(analyze_and_interpret("multivariate", None, multi["error"], True))
                     else:
                         st.write(f"**ANOVA :** F={multi.get('anova')[0]:.2f}, p={multi.get('anova')[1]:.4f}")
                         st.write(f"**Kruskal-Wallis :** H={multi.get('kruskal')[0]:.2f}, p={multi.get('kruskal')[1]:.4f}")
                         st.write(f"**Levene :** F={multi.get('levene')[0]:.2f}, p={multi.get('levene')[1]:.4f}")
+
                         st.write(f"**Eta² :** {multi.get('eta_squared', 'N/A'):.4f}")
                         st.write(f"**Kurtosis :** {multi.get('kurtosis', 'N/A'):.2f}")
                         st.write(f"**Skewness :** {multi.get('skewness', 'N/A'):.2f}")
@@ -1158,15 +1247,19 @@ def main():
                 with st.form(key='chi2_form'):
                     col1, col2 = st.columns(2)
                     with col1:
+
                         chi_var1 = st.selectbox("Variable qualitative 1", qual_cols, key="chi2_var1_select")
                     with col2:
                         chi_var2 = st.selectbox("Variable qualitative 2", qual_cols, index=1, key="chi2_var2_select")
+
                     submit_chi2 = st.form_submit_button(label="✅ Effectuer")
                 if submit_chi2 and chi_var1 != chi_var2:
                     chi2_results = chi2_test(data, chi_var1, chi_var2)
                     test_results["chi2"] = {"var1": chi_var1, "var2": chi_var2, **chi2_results}
                     if "error" in chi2_results:
+
                         st.error(analyze_and_interpret("chi2", None, chi2_results["error"], True))
+
                     else:
                         st.write(f"**Chi² :** {chi2_results.get('chi2', 'N/A'):.2f}")
                         st.write(f"**p-valeur :** {chi2_results.get('p_value', 'N/A'):.4f}")
@@ -1178,6 +1271,7 @@ def main():
                         st.plotly_chart(fig_bar, use_container_width=True)
 
             if 'latitude' in data.columns and 'longitude' in data.columns:
+
                 map_col = st.selectbox("Taille/Couleur", ["Aucune"] + list(data.columns), key="map_col_select")
                 map_size = st.checkbox("Taille", key="map_size_checkbox") if map_col != "Aucune" else False
                 fig_map = px.scatter_mapbox(data, lat="latitude", lon="longitude", 
@@ -1185,10 +1279,12 @@ def main():
                                           size=map_col if map_size and map_col != "Aucune" else None, 
                                           color=map_col if not map_size and map_col != "Aucune" else None,
                                           zoom=10, height=600, title=f"Carte ({dataset_to_analyze})")
+
                 fig_map.update_layout(mapbox_style="dark")
                 st.plotly_chart(fig_map, use_container_width=True)
 
         with tab3:
+
             if len(quant_cols) > 1:
                 corr_method = st.selectbox("Méthode de corrélation", ["pearson", "spearman"], key="corr_method_select")
                 corr_mat = correlation_matrix(data, method=corr_method)
@@ -1207,11 +1303,13 @@ def main():
                 available_targets = [col for col in data.columns if col not in features]
                 target = st.selectbox("Variable cible", available_targets, key="model_target_select") if "Clustering" not in st.session_state.get('modeling_type', '') else None
                 modeling_type = st.selectbox("Type de modélisation", ["Regression", "Classification", "Clustering"], key="modeling_type_select")
+
                 model_options = {
                     "Regression": ["Linear Regression", "Polynomial Regression", "Decision Tree", "Random Forest", "XGBoost", "Stacking", "Voting"],
                     "Classification": ["Decision Tree", "Random Forest", "XGBoost", "Logistic Regression", "Stacking", "Voting"],
                     "Clustering": ["K-Means"]
                 }
+
                 model_type = st.selectbox("Modèle", model_options[modeling_type], key="model_type_select")
                 # Les options de numérisation et normalisation ont été déplacées, donc elles ne sont plus ici
                 if st.button("✅ Entraîner", key="train_model"):
@@ -1246,6 +1344,7 @@ def main():
 
         if st.button("📝 Générer un rapport", key="generate_report"):
             with tempfile.TemporaryDirectory() as temp_dir:
+
                 corr_mat = correlation_matrix(data) if len(quant_cols) > 1 else None
                 chi2_mat = chi2_matrix(data) if len(qual_cols) > 1 else None
                 try:
@@ -1253,8 +1352,10 @@ def main():
                     report = generate_gemini_report(temp_pdf)
                     st.session_state['chat_history'] = [("", report)]
                     st.success("Rapport généré avec succès !")
+
                 except Exception as e:
                     st.error(f"Erreur génération rapport: {str(e)}")
+
 
                 if st.session_state['chat_history']:
                     st.markdown("<div class='section-box'><h2>📜 Rapport Généré</h2>", unsafe_allow_html=True)
@@ -1265,6 +1366,7 @@ def main():
                         data=pdf_bytes,
                         file_name=f"rapport_{dataset_to_analyze}.pdf",
                         mime="application/pdf",
+
                         key="download_report_button"
                     )
                     st.markdown("</div>", unsafe_allow_html=True)
@@ -1272,3 +1374,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
